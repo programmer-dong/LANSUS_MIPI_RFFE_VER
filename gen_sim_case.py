@@ -153,34 +153,29 @@ def read_other_reg(file, result_write_reg, ext_com_support, first_indent):
         if len(parts) > 1:
             reg_format = parts[1]
             decimal_number = int(reg_format, 16)
-            if decimal_number < 31:
-                if reserved_len != 0:
-                    for re_reg, re_value in reg_reserved_dicr.items():
-                        if key_result == re_reg:
-                            reserved_write = generate_mask_strings(re_value)
-                            file.write(loop_style + "reg_read_chk(usid_user,8'h" + reg_format
-                                    + "," + value_result +reserved_write+ ");" + code_style)
-                        else:
-                            file.write(loop_style + "reg_read_chk(usid_user,8'h" + reg_format
-                                    + "," + value_result + ");" + code_style)
-                else:
-                    file.write(loop_style + "reg_read_chk(usid_user,8'h" + reg_format
-                                    + "," + value_result + ");" + code_style)
-                
-            elif decimal_number > 31 and ext_com_support == "support" :
-                if reserved_len != 0:
-                    for re_reg, re_value in reg_reserved_dicr.items():
-                        if key_result == re_reg:
-                            reserved_write = generate_mask_strings(re_value)
-                            file.write(loop_style + "ext_reg_read_chk(usid_user,8'h" + reg_format
-                                    + ",8'h00," + value_result + reserved_write+ ");" + code_style)
-                        else:
-                            file.write(loop_style + "ext_reg_read_chk(usid_user,8'h" + reg_format
-                                    + ",8'h00," + value_result + ");" + code_style)
-                else:
-                    file.write(loop_style + "ext_reg_read_chk(usid_user,8'h" + reg_format
-                                    + ",8'h00," + value_result + ");" + code_style)
-    file.write(first_indent + "end"+code_style)
+            reserved_write = "" 
+            if reserved_len != 0:  # Ensure reserved_len is defined somewhere  
+                if key_result in reg_reserved_dicr:  
+                    reserved_write = generate_mask_strings(reg_reserved_dicr[key_result])  
+  
+            if decimal_number < 31:  
+                if reserved_write:  
+                    file.write(loop_style + "reg_read_chk(usid_user,8'h" + reg_format  
+                              + "," + value_result + reserved_write + ");" + code_style)  
+                else:  
+                    file.write(loop_style + "reg_read_chk(usid_user,8'h" + reg_format  
+                              + "," + value_result + ");" + code_style)  
+  
+            elif decimal_number > 31 and ext_com_support == "support":  
+                if reserved_write:  
+                    file.write(loop_style + "ext_reg_read_chk(usid_user,8'h" + reg_format  
+                              + ",8'h00," + value_result + reserved_write + ");" + code_style)  
+                else:  
+                    file.write(loop_style + "ext_reg_read_chk(usid_user,8'h" + reg_format  
+                              + ",8'h00," + value_result + ");" + code_style)  
+  
+    file.write(first_indent + "end" + code_style)
+
 
 
 def check_mipi_default_value(all_trigger_dict, command_support):
@@ -191,16 +186,44 @@ def check_mipi_default_value(all_trigger_dict, command_support):
             if each_trigger.lower() not in mipi_reserver_all_reg:
                 trigger_format = each_trigger.split("x")[1]
                 value_str = ''.join([val[4] for val in each_value])
+                default_value_dict[each_trigger] = value_str
                 write_reg_chk(sim_defult_file, trigger_format, value_str, command_support)
+        sim_defult_file.write("reg_read_chk(usid_user,8'h1c,9'h080);"+code_style)
+        sim_defult_file.write("reg_read_chk(usid_user,8'h1d,{1'b0,product_id_user[7:0]});"+code_style)
+        sim_defult_file.write("reg_read_chk(usid_user,8'h1e,{1'b0,man_id_uses[7:0]});"+code_style)
+        sim_defult_file.write("reg_read_chk(usid_user,8'h1f,{1'b0,man_id_user[11:8],usid_user});"+code_style) 
+        if '0x20' in mipi_reserved_reg:
+            sim_defult_file.write("ext_reg_read_chk(usid_user,8'h20,8'h00,{1'b0,ext_product_id_user[7:0]});"+code_style)
+        if '0x21' in mipi_reserved_reg:
+            sim_defult_file.write("ext_reg_read_chk(usid_user,8'h21,8'h00,{1'b0,revision_id_user[7:0]});"+code_style)
+        if '0x22' in mipi_reserved_reg:
+            sim_defult_file.write("ext_reg_read_chk(usid_user,8'h22,8'h00,{1'b0,8'h00});"+code_style)
+        if '0x23' in mipi_reserved_reg:
+            sim_defult_file.write("ext_reg_read_chk(usid_user,8'h23,8'h00,{1'b0,8'h00});"+code_style)
+        if '0x24' in mipi_reserved_reg:
+            sim_defult_file.write("ext_reg_read_chk(usid_user,8'h24,8'h00,{1'b0,8'h00});"+code_style)
+        if '0x2b' in mipi_reserved_reg or '0x2B' in mipi_reserved_reg:
+            sim_defult_file.write("ext_reg_read_chk(usid_user,8'h2b,8'h00,{1'b0,busld_user[7:0]});"+code_style)
+        if '0x2c' in mipi_reserved_reg or '0x2C' in mipi_reserved_reg:
+            sim_defult_file.write("ext_reg_read_chk(usid_user,8'h2c,8'h00,{1'b0,8'hd2});"+code_style)
+        if '0x2d' in mipi_reserved_reg or '0x2D' in mipi_reserved_reg:
+            sim_defult_file.write("ext_reg_read_chk(usid_user,8'h2d,8'h00,{1'b0,8'h00});"+code_style)
+        if '0x2e' in mipi_reserved_reg or '0x2E' in mipi_reserved_reg:
+            sim_defult_file.write("ext_reg_read_chk(usid_user,8'h2e,8'h00,{1'b0,8'h00});"+code_style)
+        if '0x2f' in mipi_reserved_reg or '0x2F' in mipi_reserved_reg:
+            sim_defult_file.write("ext_reg_read_chk(usid_user,8'h2f,8'h00,{1'b0,8'h00});"+code_style)
+        if '0x30' in mipi_reserved_reg:
+            sim_defult_file.write("ext_reg_read_chk(usid_user,8'h30,8'h00,{1'b0,8'h00});"+code_style)
         sim_defult_file.write("\n" + "endtask" + "\n")
     remove_empty_lines("sim_default_value.v")
     shutil.move("sim_default_value.v", os.path.join("sim_case_list", "sim_default_value.v"))
 
 
 def write_reg_chk(file, trigger_format, value_str, command_support):
-    if command_support == "support":
+    number_int = int(trigger_format, 16)
+    if command_support == "support" and number_int > 31:
         file.write(f"ext_reg_read_chk(usid_user,8'h{trigger_format}, 8'h00, 9'b0{value_str});\n" + "     ")
-    else:
+    elif number_int <= 31:
         file.write(f"reg_read_chk(usid_user,8'h{trigger_format}, 9'b0{value_str});\n" + "     ")
 
 
@@ -295,20 +318,74 @@ def write_spec_data(file, reg_single, tag):
             trigger = reg_value[0][6]   
     write_data_list = ["8'h55", "8'haa", "8'h66", "8'h99","8'h33", "8'hcc", "8'hff", "8'h00"]
     read_check_list = ["8'h00", "8'h55", "8'haa", "8'h66", "8'h99","8'h33", "8'hcc", "8'hff"]
-    # decimal_number = int(reg_format, 16)
+    masked_write_data = ["8'haa,8'h55", "8'h66,8'h99", "8'hcc,8'h33", "8'hff,8'h00", "8'h00,8'h00"]
+    masked_check = ["8'h55", "8'hdd", "8'hff", "8'hff", "8'h00"]
+    decimal_number = int(reg_format, 16)
+    for write_data, check_data in zip(masked_write_data, masked_check):
+        if tag == 7 :
+            file.write(first_style + "masked_write(usid_user,8'h"+reg_format+","+write_data+");"+code_style)     
+            if decimal_number <= 31:
+                reserved_written = False
+                if reserved_len != 0:
+                    for re_reg, re_value in reg_reserved_dicr.items():
+                        if reg_single == re_reg:
+                            reserved_write = generate_mask_strings(re_value)
+                            file.write(first_style+"reg_read_chk(usid_user,8'h"+reg_format+","+"{1'b0,"+check_data+reserved_write+"});"+code_style)
+                            reserved_written = True
+                            break
+                if not reserved_written:
+                    file.write(first_style+"reg_read_chk(usid_user,8'h"+reg_format+","+"{1'b0,"+check_data+"});"+code_style)
+            else:
+                reserved_written = False
+                if reserved_len != 0:
+                    for re_reg, re_value in reg_reserved_dicr.items():
+                        if reg_single == re_reg:
+                            reserved_write = generate_mask_strings(re_value)
+                            file.write(first_style + "ext_reg_read_chk(usid_user,8'h" + reg_format + "," + "8'h00,{1'b0,"+check_data + reserved_write+"});"+code_style)
+                            reserved_written = True
+                            break
+                if not reserved_written:
+                    file.write(first_style + "ext_reg_read_chk(usid_user,8'h" + reg_format + "," + "8'h00,{1'b0,"+check_data + "});"+code_style)
     for write_data, check_data in zip(write_data_list, read_check_list):
         if tag == 0:
             file.write(first_style + "reg0_write(usid_user," + write_data + ");\n" + "     ")
             file.write(first_style + "reg_read_chk(usid_user,8'h00," + "{1'b0,"+write_data + "&8'h7f});\n" + "     ")
         elif tag == 1:
             file.write(first_style + "reg_write(usid_user,8'h" + reg_format + "," + write_data + ");\n" + "     ")
-            file.write(first_style + "reg_read_chk(usid_user,8'h" + reg_format + "," + "{1'b0,"+write_data + "});\n" + "     ")
+            reserved_written = False
+            if reserved_len != 0:
+                for re_reg, re_value in reg_reserved_dicr.items():
+                    if reg_single == re_reg:
+                        reserved_write = generate_mask_strings(re_value)
+                        file.write(first_style + "reg_read_chk(usid_user,8'h" + reg_format + "," + "{1'b0,"+write_data + reserved_write+"});\n" + "     ")
+                        reserved_written = True
+                        break
+            if not reserved_written:
+                file.write(first_style + "reg_read_chk(usid_user,8'h" + reg_format + "," + "{1'b0,"+write_data + "});\n" + "     ")
         elif tag == 2:
             file.write(first_style + "ext_reg_write(usid_user,8'h" + reg_format + ",8'h00," + write_data + ");\n" + "     ")
-            file.write(first_style + "ext_reg_read_chk(usid_user,8'h" + reg_format + "," + "8'h00,{1'b0,"+write_data + "});\n" + "     ")
+            reserved_written = False
+            if reserved_len != 0:
+                for re_reg, re_value in reg_reserved_dicr.items():
+                    if reg_single == re_reg:
+                        reserved_write = generate_mask_strings(re_value)
+                        file.write(first_style + "ext_reg_read_chk(usid_user,8'h" + reg_format + "," + "8'h00,{1'b0,"+write_data + reserved_write+"});\n" + "     ")
+                        reserved_written = True
+                        break
+            if not reserved_written:
+                file.write(first_style + "ext_reg_read_chk(usid_user,8'h" + reg_format + "," + "8'h00,{1'b0,"+write_data + "});\n" + "     ")
         elif tag == 3:
             file.write(first_style + "ext_reg_write_long(usid_user,16'h00" + reg_format + ",8'h00," + write_data + ");\n" + "     ")
-            file.write(first_style + "ext_reg_read_long_chk(usid_user,16'h00" + reg_format + "," + "8'h00,{1'b0,"+write_data + "});\n" + "     ")
+            reserved_written = False
+            if reserved_len != 0:
+                for re_reg, re_value in reg_reserved_dicr.items():
+                    if reg_single == re_reg:
+                        reserved_write = generate_mask_strings(re_value)
+                        file.write(first_style + "ext_reg_read_long_chk(usid_user,16'h00" + reg_format + "," + "8'h00,{1'b0,"+write_data + reserved_write+"});\n" + "     ")
+                        reserved_written = True
+                        break
+            if not reserved_written:
+                file.write(first_style + "ext_reg_read_long_chk(usid_user,16'h00" + reg_format + "," + "8'h00,{1'b0,"+write_data + "});\n" + "     ")
         elif tag == 4 and "trigger" in trigger.lower():
             reg_trigger_test(file, reg_single, trigger, "reg0_write", write_data, check_data)
         elif tag == 5 and "trigger" in trigger.lower():
@@ -387,6 +464,21 @@ def trigger_disable(file, all_reg_trigger):
         file.write("ext_reg_write(usid_user,8'h30,8'h00,8'hff);" + "\n" + "     ")
         file.write("ext_reg_read_chk(usid_user,8'h30,8'h00,9'h0ff);" + "\n" + "     ")
 
+def trigger_enable(file, all_reg_trigger):
+    file.write("$display(\"****standard trigger enable****\");" + code_style)
+    file.write("//============= trigger 0-2 ===============|0x1c" + code_style)
+    file.write("reg_write(usid_user,8'h1c,8'h80);" + "\n" + "     ")
+    file.write("reg_read_chk(usid_user,8'h1c,9'h080);" + "\n" + "     ")
+    if '0x2D' in all_reg_trigger or '0x2d' in all_reg_trigger:
+        file.write("$display(\"****extended trigger enable****\");" + code_style)
+        file.write("//============= trigger 3-10 ==============|0x2D" + code_style)
+        file.write("ext_reg_write(usid_user,8'h2d,8'h00,8'h00);" + "\n" + "     ")
+        file.write("ext_reg_read_chk(usid_user,8'h2d,8'h00,9'h000);" + "\n" + "     ")
+    if '0x30' in all_reg_trigger:
+        file.write("$display(\"****extended trigger enable****\");" + code_style)
+        file.write("//============ trigger 11-17 ==============|0x30" + code_style)
+        file.write("ext_reg_write(usid_user,8'h30,8'h00,8'h00);" + "\n" + "     ")
+        file.write("ext_reg_read_chk(usid_user,8'h30,8'h00,9'h000);" + "\n" + "     ")
 
 def reg0_command_loop_body(file, usid_user, result_reg_dict, ext_com_support):
     file.write("packet_rand = new(" + str(generate_random_integer())+");"+code_style)
@@ -439,18 +531,19 @@ def reg_command_loop_body(file, usid_user, each_reg, result_reg_dict, ext_com_su
         file.write("    packet_rand.randomize();" + code_style)
         file.write("    data = packet_rand.data_packet;" + code_style)
         file.write("    reg_write(" + usid_user + ",8'h" + reg_format + ",data);" + code_style)
+        reserved_written = False
         if reserved_len != 0:
             for re_reg, re_value in reg_reserved_dicr.items():
                 if each_reg == re_reg:
                     reserved_write = generate_mask_strings(re_value)
                     file.write("    reg_read_chk(usid_user,8'h" + reg_format + ",{1'b0,data"+reserved_write+"});" + code_style)
-                else:
-                    file.write("    reg_read_chk(usid_user,8'h" + reg_format + ",{1'b0,data});" + code_style)
-        else:
+                    reserved_written = True
+                    break
+        if not reserved_written:
              file.write("    reg_read_chk(usid_user,8'h" + reg_format + ",{1'b0,data});" + code_style)
         read_other_reg(file, result_reg_dict, ext_com_support, first_style)
         file.write("end" + code_style)
-        file.write("packet_rand = null;")
+        file.write("packet_rand = null;"+code_style)
 
 def reg_command_trigger_loop_body(file, usid_user, each_reg, result_reg_dict, ext_com_support, trigger_list):
     reg_format = each_reg.split("x")[1]
@@ -469,13 +562,13 @@ def reg_command_trigger_loop_body(file, usid_user, each_reg, result_reg_dict, ex
     file.write(first_style + "end" + code_style)
     file.write(first_style + "else begin" + code_style)
     if reserved_len != 0:
+        reserved_written = False
         for re_reg, re_value in reg_reserved_dicr.items():
             if each_reg == re_reg:
                 reserved_write = generate_mask_strings(re_value)
                 file.write(loop_style + "reg_read_chk(usid_user,8'h"+reg_format+",{1'b0,data_pre"+reserved_write+"});" + code_style)
-            else:
-                file.write(loop_style + "reg_read_chk(usid_user,8'h"+reg_format+",{1'b0,data_pre});" + code_style)
-    else:
+                reserved_written = True
+    if not reserved_written:
         file.write(loop_style + "reg_read_chk(usid_user,8'h"+reg_format+",{1'b0,data_pre});" + code_style)
     file.write(first_style + "end" + code_style)
     file.write(first_style + "$display(\"****trigger data to reg"+reg_format+"_direct****\");" + code_style)
@@ -487,13 +580,14 @@ def reg_command_trigger_loop_body(file, usid_user, each_reg, result_reg_dict, ex
         file.write(first_style + "// trigger_2" + code_style)
     file.write(first_style + "reg_write("+ usid_user + ",8'h1c," + trigger_list[1] + ");" + code_style)
     if reserved_len != 0:
+        reserved_written = False
         for re_reg, re_value in reg_reserved_dicr.items():
             if each_reg == re_reg:
                 reserved_write = generate_mask_strings(re_value)
                 file.write(first_style + "reg_read_chk(usid_user,8'h" + reg_format + ",{1'b0,data"+reserved_write+"});" + code_style)
-            else:
-                file.write(first_style + "reg_read_chk(usid_user,8'h" + reg_format + ",{1'b0,data});" + code_style)
-    else:
+                reserved_written = True
+                break
+    if not reserved_written:
         file.write(first_style + "reg_read_chk(usid_user,8'h" + reg_format + ",{1'b0,data});" + code_style)
     file.write(first_style + "data_pre = data;" + code_style)
     read_other_reg(file, result_reg_dict, ext_com_support, first_style)
@@ -516,13 +610,13 @@ def ext_command_loop_body(file, usid_user, each_reg, result_reg_dict, ext_com_su
     file.write("    data = packet_rand.data_packet;" + code_style)
     file.write("    ext_reg_write(" + usid_user + ",8'h" + reg_format + ",8'h00,data);" + code_style)
     if reserved_len != 0:
+        reserved_written = False
         for re_reg, re_value in reg_reserved_dicr.items():
             if each_reg == re_reg:
                 reserved_write = generate_mask_strings(re_value)
                 file.write("    ext_reg_read_chk(usid_user,8'h" + reg_format + ",8'h00,{1'b0,data"+reserved_write+"});" + code_style)
-            else:
-                file.write("    ext_reg_read_chk(usid_user,8'h" + reg_format + ",8'h00,{1'b0,data});" + code_style)
-    else:
+                reserved_written = True
+    if not reserved_written:
         file.write("    ext_reg_read_chk(usid_user,8'h" + reg_format + ",8'h00,{1'b0,data});" + code_style)
     read_other_reg(file, result_reg_dict, ext_com_support, first_style)
     file.write("end" + code_style)
@@ -544,13 +638,14 @@ def ext_command_trigger_loop_body(file, usid_user, each_reg, result_reg_dict, ex
     file.write(first_style + "end" + code_style)
     file.write(first_style + "else begin" + code_style)
     if reserved_len != 0:
+        reserved_written = False
         for re_reg, re_value in reg_reserved_dicr.items():
             if each_reg == re_reg:
                 reserved_write = generate_mask_strings(re_value)
                 file.write(loop_style +  write_command[1] + "(usid_user,8'h"+reg_format+",8'h00,{1'b0,(data_pre)"+reserved_write+"});" + code_style)
-            else:
-                file.write(loop_style +  write_command[1] + "(usid_user,8'h"+reg_format+",8'h00,{1'b0,(data_pre)});" + code_style)
-    else:
+                reserved_written = True
+                break
+    if not reserved_written:
         file.write(loop_style +  write_command[1] + "(usid_user,8'h"+reg_format+",8'h00,{1'b0,data_pre});" + code_style)
     file.write(first_style + "end" + code_style)
     file.write(first_style + "$display(\"****trigger data to reg"+reg_format+"_direct****\");" + code_style)
@@ -562,13 +657,13 @@ def ext_command_trigger_loop_body(file, usid_user, each_reg, result_reg_dict, ex
         file.write(first_style + "// trigger_2" + code_style)
     file.write(first_style + "reg_write(usid_user,8'h1c," + trigger_list[1] + ");" + code_style)
     if reserved_len != 0:
+        reserved_written = False
         for re_reg, re_value in reg_reserved_dicr.items():
             if each_reg == re_reg:
                 reserved_write = generate_mask_strings(re_value)
                 file.write(first_style +  write_command[1] + "(usid_user,8'h" + reg_format + ",8'h00,{1'b0,data"+reserved_write+"});" + code_style)
-            else:
-                file.write(first_style +  write_command[1] + "(usid_user,8'h" + reg_format + ",8'h00,{1'b0,data});" + code_style)
-    else:
+                reserved_written = True
+    if not reserved_written:
          file.write(first_style +  write_command[1] + "(usid_user,8'h" + reg_format + ",8'h00,{1'b0,data});" + code_style)
     read_other_reg(file, result_reg_dict, ext_com_support, first_style)
     file.write("end" + code_style)
@@ -583,18 +678,20 @@ def ext_command_trigger_loop_body(file, usid_user, each_reg, result_reg_dict, ex
 def ext_long_command_loop_body(file, usid_user, each_reg, result_reg_dict, ext_com_support):
     reg_format = each_reg.split("x")[1]
     write_spec_data(file, each_reg, 3)
+    file.write("packet_rand = new("+str(generate_random_integer())+");"+code_style)
     file.write("for(i=0; i<=255; i++) begin" + code_style)
     file.write("    packet_rand.randomize();" + code_style)
     file.write("    data = packet_rand.data_packet;" + code_style)
     file.write("    ext_reg_write_long(" + usid_user + ",8'h" + reg_format + ",8'h00,data);" + code_style)
     if reserved_len != 0:
+        reserved_written = False
         for re_reg, re_value in reg_reserved_dicr.items():
             if each_reg == re_reg:
                 reserved_write = generate_mask_strings(re_value)
                 file.write("    ext_reg_read_long_chk(usid_user,8'h" + reg_format + ",8'h00,{1'b0,data"+reserved_write+"});" + code_style)
-            else:
-                file.write("    ext_reg_read_long_chk(usid_user,8'h" + reg_format + ",8'h00,{1'b0,data});" + code_style)
-    else:
+                reserved_write = True
+                break
+    if not reserved_written:
         file.write("    ext_reg_read_long_chk(usid_user,8'h" + reg_format + ",8'h00,{1'b0,data});" + code_style)
     read_other_reg(file, result_reg_dict, ext_com_support, first_style)
     file.write("end" + code_style)
@@ -606,7 +703,10 @@ def masked_write_command_loop_body(file, usid_user, each_reg, result_reg_dict, e
         reg_format = parts[1]
         decimal_number = int(reg_format, 16)
         if decimal_number <= 31:
-            write_spec_data(file, each_reg, 3)
+            write_spec_data(file, each_reg, 7)
+            file.write("data_pre = 8'b" +default_value_dict[each_reg] +";"+code_style)
+            file.write("packet_rand = new("+str(generate_random_integer())+");"+code_style)
+            file.write("packet_rand_two = new("+str(generate_random_integer())+");"+code_style)
             file.write("for(i=0; i<=255; i++) begin" + code_style)
             file.write("    bit [7:0] masked_result;" + code_style)
             file.write("    packet_rand.randomize();" + code_style)
@@ -617,20 +717,26 @@ def masked_write_command_loop_body(file, usid_user, each_reg, result_reg_dict, e
             file.write("    " + "masked_write(usid_user,8'h" + reg_format + ",data[7:0],data_two[7:0]);"
                        + "\n" + "     ")
             if reserved_len != 0:
+                reserved_written = False
                 for re_reg, re_value in reg_reserved_dicr.items():
                     if each_reg == re_reg:
                         reserved_write = generate_mask_strings(re_value)
                         file.write("    reg_read_chk(usid_user,8'h" + reg_format + ",{1'b0,masked_result"+reserved_write+"});"
                                 + code_style)
-                    else:
-                        file.write("    reg_read_chk(usid_user,8'h" + reg_format + ",{1'b0,masked_result});"+ code_style)
-            else:
+                        reserved_written = True
+                        break
+            if not reserved_written:
                 file.write("    reg_read_chk(usid_user,8'h" + reg_format + ",{1'b0,masked_result});"+ code_style)
             file.write("    data_pre = masked_result;" + code_style)
             read_other_reg(file, result_reg_dict, ext_com_support, first_style)
             file.write("end" + code_style)
+            file.write("packet_rand = null;"+code_style)
+            file.write("packet_rand_two = null;"+code_style)
         elif decimal_number > 31 and ext_com_support == "support":
-            write_spec_data(file, each_reg, 3)
+            write_spec_data(file, each_reg, 7)
+            file.write("data_pre = 8'b" +default_value_dict[each_reg] +";"+code_style)
+            file.write("packet_rand = new("+str(generate_random_integer())+");"+code_style)
+            file.write("packet_rand_two = new("+str(generate_random_integer())+");"+code_style)
             file.write("for(i=0; i<=255; i++) begin" + code_style)
             file.write("    bit [7:0] masked_result;" + code_style)
             file.write("    packet_rand.randomize();" + code_style)
@@ -641,20 +747,22 @@ def masked_write_command_loop_body(file, usid_user, each_reg, result_reg_dict, e
             file.write(
                 "    " + "masked_write(usid_user,8'h" + reg_format + ",data[7:0],data_two[7:0]);" + "\n" + "     ")
             if reserved_len != 0:
+                reserved_written = False
                 for re_reg, re_value in reg_reserved_dicr.items():
                     if each_reg == re_reg:
                         reserved_write = generate_mask_strings(re_value)
                         file.write(
                             "    ext_reg_read_chk(usid_user,8'h" + reg_format + ",{1'b0,masked_result"+reserved_write+"});" + code_style)
-                    else:
-                        file.write(
-                            "    ext_reg_read_chk(usid_user,8'h" + reg_format + ",{1'b0,masked_result});" + code_style)
-            else:
+                        reserved_written = True
+                        break
+            if not reserved_written:
                 file.write(
                             "    ext_reg_read_chk(usid_user,8'h" + reg_format + ",{1'b0,masked_result});" + code_style)
             file.write("    data_pre = masked_result;" + code_style)
             read_other_reg(file, result_reg_dict, ext_com_support, first_style)
             file.write("end" + code_style)
+            file.write("packet_rand = null;"+code_style)
+            file.write("packet_rand_two = null;"+code_style)
 
 
 def masked_write_command_trigger_loop_body(file, usid_user, each_reg, result_reg_dict, ext_com_support, trigger_list):
@@ -663,13 +771,16 @@ def masked_write_command_trigger_loop_body(file, usid_user, each_reg, result_reg
         reg_format = parts[1]
         decimal_number = int(reg_format, 16)
         if decimal_number <= 31:
-            write_spec_data(file, each_reg, 3)
+            write_spec_data(file, each_reg, 7)
             file.write("$display(\"*****standard trigger enble*****\");" + code_style)
             file.write("//============= trigger 0-2 ===============|0x1c" + code_style)
             file.write("reg_write(usid_user,8'h1c,8'h80);" + "\n" + "     ")
             file.write("reg_read_chk(usid_user,8'h1c,9'h080);" + "\n" + "     ")
             file.write("// reg" + reg_format + code_style)
             file.write("$display(\"****reg"+reg_format+" trigger test****\");" + code_style)
+            file.write("data_pre = 8'b" +default_value_dict[each_reg] +";"+code_style)
+            file.write("packet_rand = new("+str(generate_random_integer())+");"+code_style)
+            file.write("packet_rand_two = new("+str(generate_random_integer())+");"+code_style)
             file.write("for(i=0; i<=255; i++) begin" + code_style)
             file.write("    bit [7:0] masked_result;" + code_style)
             file.write("    packet_rand.randomize();" + code_style)
@@ -687,21 +798,23 @@ def masked_write_command_trigger_loop_body(file, usid_user, each_reg, result_reg
                 file.write(first_style + "// trigger_2" + code_style)
             file.write("    reg_write(usid_user,8'h1c,"+trigger_list[1]+");" + code_style)
             if reserved_len != 0:
+                reserved_written = False
                 for re_reg, re_value in reg_reserved_dicr.items():
                     if each_reg == re_reg:
                         reserved_write = generate_mask_strings(re_value)
                         file.write("    reg_read_chk(usid_user,8'h" + reg_format + ",{1'b0,masked_result"+reserved_write+"});"
                         + code_style)
-                    else:
-                        file.write("    reg_read_chk(usid_user,8'h" + reg_format + ",{1'b0,masked_result});"
-                        + code_style)
-            else:
+                        reserved_written == True
+                        break
+            if not reserved_written:
                  file.write("    reg_read_chk(usid_user,8'h" + reg_format + ",{1'b0,masked_result});"
                         + code_style)
             file.write("    data_pre = masked_result;"+ code_style)
             file.write("\n     ")
             read_other_reg(file, result_reg_dict, ext_com_support, first_style)
             file.write("end" + code_style)
+            file.write("packet_rand = null;"+code_style)
+            file.write("packet_rand_two = null;"+code_style)
             file.write("// reset reg1c" + code_style)
             file.write("reg_write(usid_user,8'h1c,8'h40);" + code_style)
             file.write("reg_write(usid_user,8'h1c,8'hb8);" + code_style)
@@ -710,13 +823,16 @@ def masked_write_command_trigger_loop_body(file, usid_user, each_reg, result_reg
             if '0x30' in mipi_reserved_reg:
                 file.write("ext_reg_write(usid_user,8'h30,8'h00,8'hff);" + code_style)
         elif decimal_number > 31 and ext_com_support == "support":
-            write_spec_data(file, each_reg, 3)
+            write_spec_data(file, each_reg, 7)
             file.write("$display(\"*****standard trigger enble*****\");" + code_style)
             file.write("//============= trigger 0-2 ===============|0x1c" + code_style)
             file.write("reg_write(usid_user,8'h1c,8'h80);" + "\n" + "     ")
             file.write("reg_read_chk(usid_user,8'h1c,9'h080);" + "\n" + "     ")
             file.write("// reg" + reg_format + code_style)
             file.write("$display(\"****reg"+reg_format+" trigger test****\");" + code_style)
+            file.write("data_pre = 8'b" +default_value_dict[each_reg] +";"+code_style)
+            file.write("packet_rand = new("+str(generate_random_integer())+");"+code_style)
+            file.write("packet_rand_two = new("+str(generate_random_integer())+");"+code_style)
             file.write("for(i=0; i<=255; i++) begin" + code_style)
             file.write("    bit [7:0] masked_result;" + code_style)
             file.write("    packet_rand.randomize();" + code_style)
@@ -734,21 +850,23 @@ def masked_write_command_trigger_loop_body(file, usid_user, each_reg, result_reg
                 file.write(first_style + "// trigger_2" + code_style)
             file.write("    reg_write(usid_user,8'h1c,"+trigger_list[1]+");" + code_style)
             if reserved_len != 0:
+                reserved_written = False
                 for re_reg, re_value in reg_reserved_dicr.items():
                     if each_reg == re_reg:
                         reserved_write = generate_mask_strings(re_value)
                         file.write(
                             "    ext_reg_read_chk(usid_user,8'h" + reg_format + ",8'h00,{1'b0,masked_result"+reserved_write+"});" + code_style)
-                    else:
-                        file.write(
-                            "    ext_reg_read_chk(usid_user,8'h" + reg_format + ",8'h00,{1'b0,masked_result});" + code_style)
-            else:
+                        reserved_written = True
+                        break
+            if not reserved_write:
                  file.write(
                             "    ext_reg_read_chk(usid_user,8'h" + reg_format + ",8'h00,{1'b0,masked_result});" + code_style)
             file.write("    data_pre = masked_result;"+ code_style)
             file.write("\n     ")
             read_other_reg(file, result_reg_dict, ext_com_support, first_style)
             file.write("end" + code_style)
+            file.write("packet_rand = null;"+code_style)
+            file.write("packet_rand_two = null;"+code_style)
             file.write("// reset reg1c" + code_style)
             file.write("reg_write(usid_user,8'h1c,8'h40);" + code_style)
             file.write("reg_write(usid_user,8'h1c,8'hb8);" + code_style)
@@ -775,6 +893,7 @@ def extended_trigger_loop_body(file, usid_user,tri_reg, tri_mask, reg_format_udr
         file.write("ext_reg_read_chk(usid_user,8'h"+reg_format_udr+",8'h00,{" + ext_udr_mapped[tri_mask] + ",4'b0000});" + code_style)
     file.write("// reg" + reg_format_user + code_style)
     file.write("$display(\"****reg"+reg_format_user+" ext_trigger test****\");" + code_style)
+    file.write("packet_rand = new(" + str(generate_random_integer()) + ");" + code_style)
     file.write("for(i=0; i<=255; i++) begin" + code_style)
     file.write(first_style + "packet_rand.randomize();" + code_style)
     file.write(first_style + "data = packet_rand.data_packet;" + code_style)
@@ -793,6 +912,7 @@ def extended_trigger_loop_body(file, usid_user,tri_reg, tri_mask, reg_format_udr
     file.write(first_style + "ext_reg_read_chk(usid_user,8'h"+reg_format_user+",8'h00,data);" + code_style)
     file.write(first_style + "data_pre = data;" + code_style)
     file.write("end" + code_style)
+    file.write("packet_rand = null;"+code_style)
     file.write("reg_write(usid_user,8'h1c,8'h40);" + code_style)
     split_line(file, " end:" + tri_mask +" ")
 
@@ -847,13 +967,16 @@ def extended_timed_trigger_loop_body(file, usid_user, tri_reg, tri_mask, reg_for
         file.write("ext_reg_read_chk(usid_user,8'h"+reg_format_udr+",8'h00,{" + ext_udr_mapped[tri_mask] + ",4'b0000});" + code_style)
     file.write("// reg" + reg_format_user + code_style)
     file.write("$display(\"****reg"+reg_format_user+" ext_trigger test****\");" + code_style)
-    file.write("for(data=8'h00;data<=8'hff;data=data+1) begin" + code_style)
+    file.write("packet_rand = new(" + str(generate_random_integer()) + ");" + code_style)
+    file.write("for(i=0; i<=255; i++) begin" + code_style)
+    file.write(first_style + "packet_rand.randomize();" + code_style)
+    file.write(first_style + "data = packet_rand.data_packet;" + code_style)
     file.write(first_style + "ext_reg_write(usid_user,8'h"+reg_format_user+",8'h00,data);" + code_style)
-    file.write(first_style + "if(data==8'h00) begin" + code_style)
+    file.write(first_style + "if(i==0) begin" + code_style)
     file.write(loop_style + "ext_reg_read_chk(usid_user,8'h"+reg_format_user+",8'h00,{1'b0,9'h000});"+code_style)
     file.write(first_style + "end" + code_style)
     file.write(first_style + "else begin" + code_style)
-    file.write(loop_style + "ext_reg_read_chk(usid_user,8'h"+reg_format_user+",8'h00,{1'b0,data-8'h01});"+code_style)
+    file.write(loop_style + "ext_reg_read_chk(usid_user,8'h"+reg_format_user+",8'h00,{1'b0,data_pre});"+code_style)
     file.write(first_style + "end" + code_style) 
     display_start_fun(file, "write time cnt reg")
     for tri_name, cnt_reg in timed_tri_mapped.items():
@@ -862,7 +985,9 @@ def extended_timed_trigger_loop_body(file, usid_user, tri_reg, tri_mask, reg_for
             timed_trigger_cnt(file, cnt_reg.replace("8'h", ""), write_cnt_number)
     file.write(first_style + "// read " + reg_format_user + code_style)
     file.write(first_style + "ext_reg_read_chk(usid_user,8'h"+reg_format_user+",8'h00,data);" + code_style)
-    file.write("end" + code_style) 
+    file.write(first_style + "data_pre = data;" + code_style)
+    file.write("end" + code_style)
+    file.write("packet_rand = null;"+code_style)
     file.write("reg_write(usid_user,8'h1c,8'h40);" + code_style) 
     split_line(file, " end:" + tri_mask +" ")
     file.write("\n" + code_style) 
@@ -871,6 +996,7 @@ def extended_timed_trigger_loop_body(file, usid_user, tri_reg, tri_mask, reg_for
 def sim_reg1c_reg(file, usid_user, each_reg):
     reg_format = each_reg.split("x")[1]
     display_reg(file, each_reg)
+
     file.write("for(data=8'h00;data<=8'hff;data=data+1) begin" + code_style)
     file.write("    reg_write(" + usid_user + ",8'h" + reg_format + ",data&8'b1011_1111);" + code_style)
     file.write("    reg_read_chk(usid_user,8'h" + reg_format + ",{1'b0,data&8'b1011_1000});" + code_style)
@@ -880,6 +1006,8 @@ def sim_reg1c_reg(file, usid_user, each_reg):
 def sim_reg1d_reg1e_reg1f_reg(file, usid_user, each_reg):
     reg_format = each_reg.split("x")[1]
     display_reg(file, each_reg)
+    result_reg_dict = write_other_reg(file, '0x1d', all_user_dicr, extended_command)
+    file.write("packet_rand = new("+str(generate_random_integer())+");"+code_style)
     file.write("for(i=0; i<=255; i++) begin" + code_style)
     file.write("    packet_rand.randomize();" + code_style)
     file.write("    data = packet_rand.data_packet;" + code_style)
@@ -890,13 +1018,16 @@ def sim_reg1d_reg1e_reg1f_reg(file, usid_user, each_reg):
         file.write("    reg_read_chk(usid_user,8'h" + reg_format + ",{1'b0,man_id_user[8:0]});" + code_style)
     if each_reg.lower() == "0x1f":
         file.write("    reg_read_chk(usid_user,8'h" + reg_format + ",{1'b0,man_id_user[11:8], usid_user});" + code_style)
+    read_other_reg(file, result_reg_dict, extended_command, "")
     file.write("end" + code_style)
+    file.write("packet_rand = null;"+code_style)
 
 
 def sim_reg20_to_reg30_reg(file, usid_user, each_reg):
     reg_format = each_reg.split("x")[1]
     display_reg(file, each_reg)
-    write_other_reg
+    result_reg_dict = write_other_reg(file, '0x1d', all_user_dicr, extended_command)
+    file.write("packet_rand = new("+str(generate_random_integer())+");"+code_style)
     file.write("for(i=0; i<=255; i++) begin" + code_style)
     file.write("    packet_rand.randomize();" + code_style)
     file.write("    data = packet_rand.data_packet;" + code_style)
@@ -923,11 +1054,15 @@ def sim_reg20_to_reg30_reg(file, usid_user, each_reg):
         file.write("    ext_reg_read_chk(usid_user,8'h" + reg_format + ",8'h00,{1'b0,8'h00});" + code_style)
     if each_reg.lower() == '0x30':
         file.write("    ext_reg_read_chk(usid_user,8'h" + reg_format + ",8'h00,{1'b0,data});" + code_style)
+    if each_reg.lower() != '0x23':
+        read_other_reg(file, result_reg_dict, extended_command, "")
     file.write("end" + code_style)
+    file.write("packet_rand = null;"+code_style)
 
 def sim_reg31_to_reg3f(file, usid_user, time_reg_list):
     for each_reg in time_reg_list:
         reg_format = each_reg.split("x")[1]
+        result_reg_dict = write_other_reg(file, '0x1d', all_user_dicr, extended_command)
         display_reg(file, each_reg)
         file.write("begin"+code_style)
         file.write(first_style +"ext_reg_write(usid_user,8'h"+reg_format+",8'h00,8'ha0);"+code_style)
@@ -942,6 +1077,8 @@ def sim_reg31_to_reg3f(file, usid_user, time_reg_list):
         file.write(first_style+"ext_reg_read_chk(usid_user,8'h" + reg_format + ",8'h00,{1'b0,8'h11});" + code_style)
         file.write(first_style+"ext_reg_read_chk(usid_user,8'h" + reg_format + ",8'h00,{1'b0,8'h00});" + code_style)
         file.write("end" + code_style)
+        read_other_reg(file, result_reg_dict, extended_command, "")
+
 
 
 def sim_error_test():
@@ -1646,11 +1783,10 @@ def sim_ext_write_more_reg_with_tri():
         write_data_begin(sim_reg) 
         sim_reg.write("task sim_ext_write_more_reg_with_tri;\n")  
         display_start_fun(sim_reg, "sim_ext_write_more_reg_with_tri")  # 确保display_start_fun已定义  
-        trigger_disable(sim_reg, reg_dicr)  # 确保reg_dicr和trigger_disable已定义  
-        first_data = list(all_user_dicr.items())[0]  # 确保all_user_dicr已定义  
+        trigger_enable(sim_reg, reg_dicr)
+        first_data = list(all_user_dicr.items())[0]  
         first_reg = first_data[0].split("x")[1]  
         int_val = int(first_reg, 16)  
-        sim_reg.write("reg_write(usid_user,8'h1c,8'h80);"+code_style)
         for i in range(1, 16):  
             list_write_reg = []  
             write_data_list = generate_random_list(i+1)
@@ -1674,9 +1810,12 @@ def sim_ext_write_more_reg_with_tri():
                     write_values.append("`NRF")  
     
             write_values_str = ",".join(write_values)  
-    
             sim_reg.write("ext_reg_write(usid_user,8'h" + first_reg + ",8'h0" + str(hex(i))[2:] + ",{" + write_data_str + "});" + code_style)
             sim_reg.write("reg_write(usid_user,8'h1c,8'h87 );" + code_style) 
+            if '0x2E' in mipi_reserved_reg or '0x2e' in mipi_reserved_reg:
+                sim_reg.write("ext_reg_write(usid_user,8'h2e,8'h00,8'hff );" + code_style)
+            if '0x2F' in mipi_reserved_reg or '0x2f' in mipi_reserved_reg:
+                sim_reg.write("ext_reg_write(usid_user,8'h2f,8'h00,8'hff );" + code_style)  
             sim_reg.write("ext_reg_read_chk(usid_user,8'h" + first_reg + ",8'h0" + str(hex(i))[2:] + ",{" + write_values_str.replace("8'h", "9'h0") + "});" + code_style)
         reg_reset_command(sim_reg)
         sim_reg.write("\n" + "endtask" + "\n")
@@ -2033,6 +2172,7 @@ if __name__ == '__main__':
 
     reserved_len = len(reg_reserved_dicr)
     # 默认值检查case生成
+    default_value_dict = {}
     check_mipi_default_value(reg_dicr, extended_command)
     # usid编程case生成
     usid_programmable_mode(mipi_reserved_reg, extended_command)
@@ -2112,6 +2252,7 @@ if __name__ == '__main__':
         sim_ext_write_more_reg_with_tri()
     # 文件抽取
     # 定义要遍历的目录  
+    '''
     sim_case_list_dir = 'sim_case_list'  
     
     # 使用with语句打开文件，确保文件正确关闭  
@@ -2136,7 +2277,7 @@ if __name__ == '__main__':
                                 outfile.write(first_style + task_name + ';\n')  
         outfile.write("endtask")
     shutil.move("all_sim_file.v", os.path.join("sim_case_list", "all_sim_file.v"))
-
+    '''
     print(f'所有验证case已提取并写入到 all_sim_file.v')
     print("Script generated successfully......")
     print("Script generated successfully......")
