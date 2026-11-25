@@ -1,0 +1,142 @@
+name: Linux 程序包
+
+on:
+  push:
+    tags:
+      - "v*.*.*"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  packages: read
+
+concurrency:
+  group: linux-packaging-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  package:
+    runs-on: ubuntu-22.04
+    timeout-minutes: 300
+    steps:
+      - name: 校验版本标签
+        if: github.event_name == 'push'
+        run: |
+          set -euo pipefail
+          [[ "${GITHUB_REF_NAME}" =~ ^v[0-9]+\.[0-9]+\.[0-9]+$ ]]
+
+      - name: 检出代码
+        uses: actions/checkout@v5
+        with:
+          fetch-depth: 0
+
+      - name: 安装并核实 Podman
+        run: |
+          set -euo pipefail
+          sudo apt-get update
+          sudo apt-get install -y podman
+          podman --version
+          podman info
+          free -h
+
+      - name: 检查构建入口
+        run: |
+          set -euo pipefail
+          test -f pyproject.toml
+          test -f uv.lock
+          test -f .python-version
+          test -f .containerignore
+          test -f mipi_gui.py
+          test -f build/linux/common/mipi_gui.spec
+          test -f build/linux/common/build.sh
+          test -f build/linux/centos7/Dockerfile
+          test -f build/linux/centos7/build-centos7.sh
+          test -f build/linux/rocky-linux8/Dockerfile
+          test -f build/linux/rocky-linux8/build-rocky-linux8.sh
+
+      - name: 登录 GHCR
+        run: |
+          set -euo pipefail
+          echo "${{ secrets.GHCR_TOKEN }}" | podman login ghcr.io --username "${{ secrets.GHCR_USERNAME }}" --password-stdin
+
+      - name: 依次构建 CentOS 7 和 Rocky Linux 8
+        run: |
+          set -euo pipefail
+          build_one() {
+            local key="$1"
+            local image="$2"
+            local dockerfile="$3"
+            local outdir="$4"
+            local alias="localhost/mipi-${key}-base:${GITHUB_RUN_ID}"
+            local built="mipi-build-${key}:${GITHUB_RUN_ID}"
+            local name="mipi-${key}-${GITHUB_RUN_ID}"
+            podman pull "${image}"
+            podman image inspect "${image}" --format '{{.Id}} {{.Digest}} {{.Os}}/{{.Architecture}}'
+            podman tag "${image}" "${alias}"
+            podman image exists "${alias}"
+            podman build --layers \
+              --file "${dockerfile}" \
+              --ignorefile .containerignore \
+              --build-arg "BASE_IMAGE=${alias}" \
+              --tag "${built}" \
+              .
+            mkdir -p "${outdir}"
+            podman create --name "${name}" \
+              --volume "${GITHUB_WORKSPACE}/${outdir}:/out" \
+              "${built}"
+            podman start -a "${name}"
+            test -x "${outdir}/mipi_gui/mipi_gui"
+          }
+          build_one centos7 \
+            ghcr.io/lansus-filter/lansus-centos7-base:latest \
+            build/linux/centos7/Dockerfile \
+            dist/linux/centos7-x86_64
+          build_one rocky8 \
+            ghcr.io/lansus-filter/lansus-rocky-linux8-base:latest \
+            build/linux/rocky-linux8/Dockerfile \
+            dist/linux/rocky-linux8-x86_64
+
+      - name: 整理候选包并校验
+        run: |
+          set -euo pipefail
+          rm -rf candidate
+          mkdir -p candidate/centos-7 candidate/rocky-linux8
+          tar -C dist/linux/centos7-x86_64 -cf candidate/centos-7/mipi_gui.tar mipi_gui
+          tar -C dist/linux/rocky-linux8-x86_64 -cf candidate/rocky-linux8/mipi_gui.tar mipi_gui
+          tar -tf candidate/centos-7/mipi_gui.tar | grep -qx 'mipi_gui/mipi_gui'
+          tar -tf candidate/rocky-linux8/mipi_gui.tar | grep -qx 'mipi_gui/mipi_gui'
+          expected=$'candidate/centos-7/mipi_gui.tar\ncandidate/rocky-linux8/mipi_gui.tar'
+          actual="$(find candidate -type f | sort)"
+          test "${actual}" = "${expected}"
+          (
+            cd candidate
+            find . -type f -print0 | sort -z | xargs -0 sha256sum > SHA256SUMS
+            sha256sum --check SHA256SUMS
+          )
+
+      - name: 失败时保留诊断
+        if: failure()
+        run: |
+          free -h
+          podman ps -a
+          podman logs "mipi-centos7-${GITHUB_RUN_ID}" || true
+          podman logs "mipi-rocky8-${GITHUB_RUN_ID}" || true
+          ls -laR dist || true
+
+      - name: 上传候选包
+        uses: actions/upload-artifact@v4
+        with:
+          name: mipi-gui-linux-${{ github.ref_name }}-${{ github.run_id }}
+          path: candidate
+          if-no-files-found: error
+          retention-days: 14
+
+      - name: 清理本次容器和镜像
+        if: always()
+        run: |
+          podman rm -f "mipi-centos7-${GITHUB_RUN_ID}" "mipi-rocky8-${GITHUB_RUN_ID}" || true
+          podman rmi -f \
+            "mipi-build-centos7:${GITHUB_RUN_ID}" \
+            "mipi-build-rocky8:${GITHUB_RUN_ID}" \
+            "localhost/mipi-centos7-base:${GITHUB_RUN_ID}" \
+            "localhost/mipi-rocky8-base:${GITHUB_RUN_ID}" || true

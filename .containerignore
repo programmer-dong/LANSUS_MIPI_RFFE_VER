@@ -1,0 +1,11 @@
+.git
+.github
+.idea
+.venv
+venv
+dist
+docs
+**/__pycache__
+**/*.pyc
+**/*.xls
+**/*.xlsx

@@ -1,1 +1,7 @@
 /sim_case_list/
+/dist/
+/.venv/
+/docs/archive
+/docs/tasks
+__pycache__/
+*.pyc

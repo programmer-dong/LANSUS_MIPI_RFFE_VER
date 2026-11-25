@@ -1,0 +1,22 @@
+[project]
+name = "mipi-rffe-ver"
+version = "1.0.0"
+description = "MIPI RFFE 激励生成与仿真流程"
+readme = "README.md"
+requires-python = ">=3.11.18,<3.12"
+dependencies = [
+    "numpy==2.2.6",
+    "openpyxl>=3.1.5",
+    "pandas>=2.2.3,<2.3",
+    "xlrd==2.0.2",
+]
+
+[dependency-groups]
+dev = [
+    "pyinstaller>=6.11",
+    "pyinstaller-hooks-contrib>=2025.8",
+]
+
+[tool.uv]
+package = false
+required-version = "==0.13.10"
