@@ -24,7 +24,7 @@ ENV PATH="/usr/local/bin:${PATH}"
 
 WORKDIR /src
 COPY pyproject.toml uv.lock .python-version ./
-COPY mipi_gui.py gen_sim_case.py sim_flow.py ./
+COPY mipi_gui.py gen_sim_case.py sim_flow.py sim_top_gen.py ./
 COPY build/linux/common ./build/linux/common
 COPY build/linux/centos7/build-centos7.sh ./build/linux/centos7/build-centos7.sh
 RUN chmod +x /src/build/linux/centos7/build-centos7.sh /src/build/linux/common/build.sh
