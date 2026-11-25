@@ -62,14 +62,28 @@ def reg_decimal(reg_address):
     return int(reg_hex(reg_address), 16)
 
 
+def _bit_spec_covers(spec, bit):
+    text = str(spec).strip()
+    if ":" not in text:
+        return int(text) == bit
+    high_bit, low_bit = text.split(":")
+    return int(low_bit) <= bit <= int(high_bit)
+
+
 def reserved_mask_for(reg_key):
-    if not reserved_len:
-        return ""
     normalized_key = normalize_reg(reg_key)
-    for reserved_key, reserved_bits in reg_reserved_dicr.items():
-        if normalize_reg(reserved_key) == normalized_key:
-            return generate_mask_strings(reserved_bits)
-    return ""
+    bits = []
+    if reserved_len:
+        for reserved_key, reserved_bits in reg_reserved_dicr.items():
+            if normalize_reg(reserved_key) == normalized_key:
+                bits = list(reserved_bits)
+                break
+    # 0x30 的 bit7 设计上写不进去，读回只比对低 7 位。
+    if normalized_key == "0x30" and not any(_bit_spec_covers(spec, 7) for spec in bits):
+        bits.append("7")
+    if not bits:
+        return ""
+    return generate_mask_strings(bits)
 
 
 def has_reserved_bits(reg_key):
@@ -151,13 +165,29 @@ def emit_trigger_comment(file, trigger_val):
             return
 
 
+def _contains_3_17(value):
+    if isinstance(value, str):
+        return "3_17" in value.lower()
+    if isinstance(value, (list, tuple)):
+        return any(_contains_3_17(item) for item in value)
+    return False
+
+
+def supports_ext_trigger_3_17():
+    for table in (udr_set_reg, extended_trigger_reg):
+        for rows in table.values():
+            if _contains_3_17(rows):
+                return True
+    return False
+
+
 def reset_reg1c(file):
     file.write("// reset reg1c" + code_style)
     file.write("reg_write(usid_user,8'h1c,8'h40);" + code_style)
     file.write("reg_write(usid_user,8'h1c,8'hb8);" + code_style)
     if has_reg(mipi_reserved_reg, "0x2d"):
         file.write("ext_reg_write(usid_user,8'h2d,8'h00,8'hff);" + code_style)
-    if has_reg(mipi_reserved_reg, "0x30"):
+    if has_reg(mipi_reserved_reg, "0x30") or supports_ext_trigger_3_17():
         file.write("ext_reg_write(usid_user,8'h30,8'h00,8'hff);" + code_style)
         file.write("ext_reg_read_chk(usid_user,8'h30,8'h00,9'h07f);" + code_style)
 
@@ -504,7 +534,10 @@ def sim_reg0_write_command(reg_dict, all_reg, reg_com_support):
 
 def _set_extended_trigger(file, all_reg_trigger, reg_addr, trigger_range, enable):
     reg_key = f"0x{reg_addr}"
-    if not has_reg(all_reg_trigger, reg_key):
+    present = has_reg(all_reg_trigger, reg_key) or has_reg(mipi_reserved_reg, reg_key)
+    if reg_addr == "30" and supports_ext_trigger_3_17():
+        present = True
+    if not present:
         return
     mode = "enable" if enable else "disable"
     write_val = "8'h00" if enable else "8'hff"
@@ -831,6 +864,8 @@ def sim_reg1c_reg(file, usid_user, each_reg):
     file.write("    reg_write(" + usid_user + ",8'h" + reg_format + ",8'hb8);" + code_style)
     if has_reg(mipi_reserved_reg, "0x2d"):
         file.write("    ext_reg_write(" + usid_user + ",8'h2d,8'h00,8'hff);" + code_style)
+    if has_reg(mipi_reserved_reg, "0x30") or supports_ext_trigger_3_17():
+        file.write("    ext_reg_write(" + usid_user + ",8'h30,8'h00,8'hff);" + code_style)
     file.write("end" + code_style)
 
 
@@ -878,7 +913,7 @@ def sim_reg20_to_reg30_reg(file, usid_user, each_reg):
         "0x2c": "{1'b0,8'hd2}",
         "0x2d": "{1'b0,data}",
         "0x2f": "{1'b0,8'h00}",
-        "0x30": "{1'b0,data}",
+        "0x30": "{1'b0,data" + reserved_mask_for("0x30") + "}",
     }.get(each_reg.lower())
     if readback:
         file.write("    ext_reg_read_chk(usid_user,8'h" + reg_format + ",8'h00," + readback + ");" + code_style)
@@ -1039,6 +1074,8 @@ def sim_masked_write_no_trigger(all_reg, all_user_reg, ext_com_support):
             if "M" in value_masked[0][7] or "m" in value_masked[0][7]:
                 if mipi_reg_exists("0x2d"):
                     sim_masked.write("ext_reg_write(usid_user,8'h2d,8'h00,8'hff);" + code_style)
+                if mipi_reg_exists("0x30") or supports_ext_trigger_3_17():
+                    sim_masked.write("ext_reg_write(usid_user,8'h30,8'h00,8'hff);" + code_style)
                 result_reg_dict = write_other_reg(sim_masked, key_masked, all_user_reg, ext_com_support)
                 display_reg(sim_masked, key_masked)
                 masked_write_command_loop_body(

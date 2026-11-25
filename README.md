@@ -71,7 +71,7 @@ graph LR
 python mipi_gui.py
 ```
 
-界面打开后，工程目录默认是 `C:\Users\Dong Tao\Desktop\python_develop\python_sim_env`。换工程时点「选择」。
+界面打开后，工程目录默认是 `C:\Users\Dong Tao\Desktop\python_develop\python_sim_env`。换工程时点「选择」。目录还不存在时，把路径填进工程目录，点「创建」。
 
 ## 按顺序操作
 
@@ -109,6 +109,8 @@ filelist 里的 RTL 路径仍写成 `../../src/slave/<文件名>`，再加上对
 
 确认设计路径后，点「2 生成环境」。
 
+点「生成连接」时，从设计路径里的 `mipi_core.v` 读取端口，改写工程目录 `sim_top/rffe_base.v` 的 `mipi_slave` 连接。`rffe_base.v` 里的任务库保持不变。点「仿真配置」可以改 `sim_top/sim_config.v` 里的 USID、厂家号和产品号，保存后写入该文件。
+
 > 这一步会清空上一级目录中当前模式的全部内容，例如选择 `sim` 会清空 `python_develop\sim`。确认框点确定后才会执行。
 
 生成结果：
@@ -131,7 +133,7 @@ Linux 上，`sim_config.v`、`rffe_base.v` 和用例激励以符号链接放进�
 
 ### 7. 检查日志
 
-点「5 检查日志」。只统计日志中的 `ERROR!!!`。
+点「5 检查日志」。只统计日志中的 `ERROR!!!`。有错误的日志名可以点击，打开该用例的仿真目录。
 
 结果包括：
 

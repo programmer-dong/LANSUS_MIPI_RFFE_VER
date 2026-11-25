@@ -1,4 +1,7 @@
 import os
+import re
+import subprocess
+import sys
 import threading
 import tkinter as tk
 from pathlib import Path
@@ -6,6 +9,7 @@ from tkinter import filedialog, messagebox, ttk
 
 import gen_sim_case
 import sim_flow
+import sim_top_gen
 
 
 APP_DIR = Path(__file__).resolve().parent
@@ -25,6 +29,45 @@ def default_project():
     if DEFAULT_ENV.is_dir():
         return DEFAULT_ENV
     return APP_DIR
+
+
+_LOG_LINK = re.compile(r"all_sim_log/\S+\.log")
+
+
+def sim_folder_for_log(project, relative, mode):
+    project = Path(project)
+    log_file = project / relative
+    if log_file.is_symlink() or log_file.is_file():
+        resolved = log_file.resolve()
+        if resolved.parent != (project / "all_sim_log").resolve() and resolved.parent.is_dir():
+            return resolved.parent
+    stem = Path(relative).stem
+    order = (mode, *(item for item in SIM_MODES if item != mode))
+    for item in order:
+        folder = project.parent / item / stem
+        if folder.is_dir():
+            return folder
+    return None
+
+
+def open_folder(folder):
+    folder = os.fspath(folder)
+    if os.name == "nt":
+        os.startfile(folder)
+        return
+    command = ["open", folder] if sys.platform == "darwin" else ["xdg-open", folder]
+    subprocess.Popen(command)
+
+
+def ensure_project_dir(raw):
+    text = str(raw).strip()
+    if not text:
+        raise ValueError("先填写要创建的工程目录。")
+    folder = Path(text)
+    if folder.is_file():
+        raise FileExistsError(f"已有同名文件: {folder}")
+    folder.mkdir(parents=True, exist_ok=True)
+    return folder
 
 
 def generate_cases(env_dir, register_file):
@@ -159,7 +202,16 @@ class MipiAutoVerifyApp:
         panel.columnconfigure(1, weight=1)
 
         self._add_section_title(panel, 0, "工程")
-        self._add_entry_row(panel, 1, "工程目录", self.project_path, [("选择", self.select_project, "Secondary.TButton")])
+        self._add_entry_row(
+            panel,
+            1,
+            "工程目录",
+            self.project_path,
+            [
+                ("选择", self.select_project, "Secondary.TButton"),
+                ("创建", self.create_project_dir, "Secondary.TButton"),
+            ],
+        )
         self._add_mode_row(panel, 2)
 
         self._add_section_title(panel, 3, "流程")
@@ -188,6 +240,8 @@ class MipiAutoVerifyApp:
         actions = tk.Frame(panel, bg=SURFACE_COLOR)
         actions.grid(row=6, column=0, columnspan=3, sticky="nw", padx=34, pady=(8, 0))
         for text, command in (
+            ("生成连接", self.generate_connections),
+            ("仿真配置", self.edit_sim_config),
             ("生成 DET", self.generate_det),
             ("3 运行仿真", self.run_sim),
             ("4 收集日志", self.collect_logs),
@@ -265,6 +319,10 @@ class MipiAutoVerifyApp:
             padx=14,
             pady=12,
         )
+        self.result_text.tag_configure("loglink", foreground="#7dd3fc", underline=True)
+        self.result_text.tag_bind("loglink", "<Button-1>", self._open_log_link)
+        self.result_text.tag_bind("loglink", "<Enter>", lambda event: self.result_text.configure(cursor="hand2"))
+        self.result_text.tag_bind("loglink", "<Leave>", lambda event: self.result_text.configure(cursor=""))
         self.result_text.grid(row=0, column=0, sticky="nsew")
         scroll = ttk.Scrollbar(frame, command=self.result_text.yview)
         scroll.grid(row=0, column=1, sticky="ns")
@@ -286,9 +344,20 @@ class MipiAutoVerifyApp:
         ).grid(row=0, column=1, sticky="ew")
 
     def select_project(self):
-        path = filedialog.askdirectory(title="选择 python_sim_env 目录", initialdir=self.project_path.get() or str(APP_DIR))
+        current = self.project_path.get().strip()
+        initial = current if Path(current).is_dir() else str(APP_DIR)
+        path = filedialog.askdirectory(title="选择 python_sim_env 目录", initialdir=initial)
         if path:
             self.project_path.set(path)
+
+    def create_project_dir(self):
+        try:
+            folder = ensure_project_dir(self.project_path.get())
+        except (ValueError, FileExistsError, OSError) as exc:
+            messagebox.showerror("工程目录", str(exc))
+            return
+        self.project_path.set(str(folder))
+        self._set_status(f"工程目录已就绪: {folder}", "#22c55e")
 
     def select_register_file(self):
         path = filedialog.askopenfilename(
@@ -331,6 +400,81 @@ class MipiAutoVerifyApp:
         if not messagebox.askokcancel("生成环境", f"将清空上一级目录中的 {mode}，然后重新生成用例。"):
             return
         self._start("正在生成环境...", lambda: sim_flow.generate_env(project, mode, design))
+
+    def generate_connections(self):
+        project = self.project_path.get().strip()
+        design = self.design_path.get().strip()
+        if not project or not design:
+            messagebox.showerror("生成连接", "先填写工程目录和设计路径。")
+            return
+        self._start("正在生成连接...", lambda: self._write_connections(project, design))
+
+    def _write_connections(self, project, design):
+        core, rffe, ports = sim_top_gen.update_rffe_instance(project, design)
+        config = Path(project) / "sim_top" / "sim_config.v"
+        if not config.is_file():
+            sim_top_gen.write_sim_config(project, sim_top_gen.default_sim_config())
+        lines = [
+            f"已更新 {rffe}",
+            f"设计文件: {core}",
+            f"端口数量: {len(ports)}",
+        ]
+        lines.extend(f"{name} ({direction})" for name, direction, _width in ports)
+        return "\n".join(lines)
+
+    def edit_sim_config(self):
+        project = self.project_path.get().strip()
+        if not project:
+            messagebox.showerror("仿真配置", "先填写工程目录。")
+            return
+        folder = Path(project)
+        if not folder.is_dir():
+            messagebox.showerror("仿真配置", f"工程目录不存在: {folder}")
+            return
+        current = sim_top_gen.load_sim_config(folder / "sim_top" / "sim_config.v")
+        edited = self._ask_sim_config(current)
+        if edited is None:
+            return
+        path = sim_top_gen.write_sim_config(folder, edited)
+        self._append_result(f"已写入 {path}\n")
+        self._set_status("仿真配置已保存", "#22c55e")
+
+    def _ask_sim_config(self, values):
+        dialog = tk.Toplevel(self.root)
+        dialog.title("仿真配置")
+        dialog.transient(self.root)
+        dialog.grab_set()
+        dialog.configure(bg=SURFACE_COLOR)
+        fields = {}
+        for index, (name, _default) in enumerate(sim_top_gen.SIM_CONFIG_FIELDS):
+            row, column = divmod(index, 2)
+            tk.Label(dialog, text=name, bg=SURFACE_COLOR, fg=TEXT_COLOR, anchor="w").grid(
+                row=row, column=column * 2, sticky="w", padx=(16, 6), pady=4
+            )
+            variable = tk.StringVar(value=values.get(name, _default))
+            entry = ttk.Entry(dialog, textvariable=variable, width=18)
+            entry.grid(row=row, column=column * 2 + 1, sticky="ew", padx=(0, 16), pady=4)
+            fields[name] = variable
+        chosen = {"values": None}
+
+        def save():
+            result = {}
+            for name, variable in fields.items():
+                text = variable.get().strip()
+                if not text:
+                    messagebox.showerror("仿真配置", f"{name} 不能为空。", parent=dialog)
+                    return
+                result[name] = text
+            chosen["values"] = result
+            dialog.destroy()
+
+        buttons = tk.Frame(dialog, bg=SURFACE_COLOR)
+        buttons.grid(row=8, column=0, columnspan=4, pady=12)
+        ttk.Button(buttons, text="保存", command=save).pack(side=tk.LEFT, padx=6)
+        ttk.Button(buttons, text="取消", command=dialog.destroy).pack(side=tk.LEFT, padx=6)
+        dialog.protocol("WM_DELETE_WINDOW", dialog.destroy)
+        dialog.wait_window()
+        return chosen["values"]
 
     def generate_det(self):
         project = self.project_path.get().strip()
@@ -391,8 +535,35 @@ class MipiAutoVerifyApp:
         self.result_text.delete("1.0", tk.END)
 
     def _append_result(self, text):
-        self.result_text.insert(tk.END, text)
+        for line in text.splitlines(keepends=True):
+            match = _LOG_LINK.search(line)
+            if not match:
+                self.result_text.insert(tk.END, line)
+                continue
+            self.result_text.insert(tk.END, line[:match.start()])
+            self.result_text.insert(tk.END, match.group(0), "loglink")
+            self.result_text.insert(tk.END, line[match.end():])
         self.result_text.see(tk.END)
+
+    def _open_log_link(self, event):
+        index = self.result_text.index(f"@{event.x},{event.y}")
+        ranges = self.result_text.tag_ranges("loglink")
+        for start, end in zip(ranges[0::2], ranges[1::2]):
+            if self.result_text.compare(start, "<=", index) and self.result_text.compare(index, "<", end):
+                relative = self.result_text.get(start, end)
+                folder = sim_folder_for_log(
+                    self.project_path.get().strip(),
+                    relative,
+                    self.mode_var.get().strip(),
+                )
+                if folder is None:
+                    messagebox.showerror("仿真目录", f"找不到仿真目录: {relative}")
+                else:
+                    try:
+                        open_folder(folder)
+                    except OSError as exc:
+                        messagebox.showerror("仿真目录", f"无法打开目录: {folder}\n{exc}")
+                return "break"
 
 
 def main():
