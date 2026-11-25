@@ -110,7 +110,7 @@ jobs:
           test "${actual}" = "${expected}"
           (
             cd candidate
-            find . -type f -print0 | sort -z | xargs -0 sha256sum > SHA256SUMS
+            sha256sum centos-7/mipi_gui.tar rocky-linux8/mipi_gui.tar > SHA256SUMS
             sha256sum --check SHA256SUMS
           )
 
