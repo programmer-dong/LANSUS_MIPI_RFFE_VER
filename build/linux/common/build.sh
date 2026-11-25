@@ -2,6 +2,7 @@
 set -euo pipefail
 
 cd /src
+export PATH="/usr/local/bin:${PATH}"
 root=/tmp/mipi-build
 mkdir -p "${root}/cache" "${root}/pyinstaller" "${root}/python"
 export UV_PROJECT_ENVIRONMENT="${root}/venv"
