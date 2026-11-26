@@ -52,6 +52,7 @@ def default_project():
 
 
 _MARK = re.compile(r"单测 \S+|/[^\s]+|[A-Za-z]:[\\/][^\s]+")
+_VERDICT = re.compile(r"验证是否通过：(PASS|FAIL)")
 
 
 def sim_folder_for_log(project, relative, mode):
@@ -359,6 +360,10 @@ class MipiAutoVerifyApp:
         )
         self.result_text.tag_configure("loglink", foreground="#7dd3fc", underline=True)
         self.result_text.tag_configure("retest", foreground="#f5c16c", underline=True)
+        self.result_text.tag_configure("pass", foreground="#4ade80", font=(self.font_name, 16, "bold"))
+        self.result_text.tag_configure("fail", foreground="#fb7185", font=(self.font_name, 16, "bold"))
+        self.result_text.tag_raise("pass")
+        self.result_text.tag_raise("fail")
         for tag, handler in (("loglink", self._open_log_link), ("retest", self._rerun_case)):
             self.result_text.tag_bind(tag, "<Button-1>", handler)
             self.result_text.tag_bind(tag, "<Enter>", lambda event: self.result_text.configure(cursor="hand2"))
@@ -604,6 +609,10 @@ class MipiAutoVerifyApp:
 
     def _append_result(self, text):
         for line in text.splitlines(keepends=True):
+            verdict = _VERDICT.search(line)
+            if verdict:
+                self.result_text.insert(tk.END, line, "pass" if verdict.group(1) == "PASS" else "fail")
+                continue
             cursor = 0
             for match in _MARK.finditer(line):
                 self.result_text.insert(tk.END, line[cursor:match.start()])
