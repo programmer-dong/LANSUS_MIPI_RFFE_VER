@@ -1,11 +1,12 @@
 import os
 import re
+import shutil
 import subprocess
 import sys
 import threading
 import tkinter as tk
 from pathlib import Path
-from tkinter import filedialog, messagebox, ttk
+from tkinter import filedialog, font as tkfont, messagebox, ttk
 
 import gen_sim_case
 import sim_flow
@@ -16,13 +17,32 @@ APP_DIR = Path(__file__).resolve().parent
 DEFAULT_ENV = APP_DIR.parent / "python_sim_env"
 SIM_MODES = ("sim", "sim_dc", "sim_post", "sim_post_max", "sim_post_min")
 
-BRAND_ORANGE = "#f5a623"
-BRAND_ORANGE_DARK = "#d98200"
-BG_COLOR = "#f4f6fa"
+BRAND_ORANGE = "#e8890c"
+BRAND_ORANGE_DARK = "#c56f08"
+BG_COLOR = "#eef1f6"
 SURFACE_COLOR = "#ffffff"
-TEXT_COLOR = "#1f2937"
-MUTED_COLOR = "#6b7280"
-BORDER_COLOR = "#d7dde8"
+TEXT_COLOR = "#1c2430"
+MUTED_COLOR = "#667085"
+BORDER_COLOR = "#e4e7ec"
+INK = "#111827"
+LOG_BG = "#12161d"
+LOG_FG = "#d7dde7"
+
+
+def ui_family(root):
+    families = set(tkfont.families(root))
+    for name in ("Microsoft YaHei UI", "Microsoft YaHei", "Noto Sans CJK SC", "Noto Sans CJK JP", "WenQuanYi Micro Hei", "PingFang SC"):
+        if name in families:
+            return name
+    return "TkDefaultFont"
+
+
+def mono_family(root):
+    families = set(tkfont.families(root))
+    for name in ("Cascadia Mono", "Consolas", "Sarasa Mono SC", "Noto Sans Mono CJK SC", "DejaVu Sans Mono"):
+        if name in families:
+            return name
+    return "TkFixedFont"
 
 
 def default_project():
@@ -59,6 +79,21 @@ def open_folder(folder):
     subprocess.Popen(command)
 
 
+def project_read_support(project):
+    path = Path(project) / "read_support.txt"
+    if path.is_file() and path.read_text(encoding="utf-8", errors="replace").strip().upper() == "NO":
+        return "否"
+    return "是"
+
+
+def store_read_support(project, value):
+    folder = Path(project)
+    if not folder.is_dir():
+        return
+    text = "NO\n" if value == "否" else "YES\n"
+    (folder / "read_support.txt").write_bytes(text.encode("utf-8"))
+
+
 def ensure_project_dir(raw):
     text = str(raw).strip()
     if not text:
@@ -70,7 +105,16 @@ def ensure_project_dir(raw):
     return folder
 
 
-def generate_cases(env_dir, register_file):
+def clear_directory(folder):
+    folder = Path(folder)
+    for child in list(folder.iterdir()):
+        if child.is_symlink() or not child.is_dir():
+            child.unlink()
+        else:
+            shutil.rmtree(child)
+
+
+def generate_cases(env_dir, register_file, read_supported=True, design=None):
     register_file = Path(register_file)
     if not register_file.is_file():
         raise FileNotFoundError(f"寄存器表不存在: {register_file}")
@@ -81,7 +125,12 @@ def generate_cases(env_dir, register_file):
     old_cwd = os.getcwd()
     try:
         os.chdir(env_dir)
-        output_dir = Path(gen_sim_case.generate_sim_cases(str(register_file)))
+        ports = []
+        if not read_supported:
+            core = sim_top_gen.find_mipi_core(design)
+            parsed = sim_top_gen.parse_mipi_ports(core.read_text(encoding="utf-8", errors="replace"))
+            ports = sim_top_gen.output_reg_addrs(parsed)
+        output_dir = Path(gen_sim_case.generate_sim_cases(str(register_file), read_supported, ports))
     finally:
         os.chdir(old_cwd)
 
@@ -100,30 +149,39 @@ def generate_cases(env_dir, register_file):
 class MipiAutoVerifyApp:
     def __init__(self, root):
         self.root = root
-        self.root.title("Lansus MIPI Verification Platform")
+        self.root.title("Lansus MIPI")
         self.root.geometry("1080x760")
-        self.root.minsize(960, 640)
+        self.root.minsize(980, 680)
+        self.root.configure(bg=BG_COLOR)
+        self.font_name = ui_family(self.root)
+        self.mono_name = mono_family(self.root)
 
         self.project_path = tk.StringVar(value=str(default_project()))
         self.register_path = tk.StringVar()
         self.design_path = tk.StringVar()
         self.mode_var = tk.StringVar(value=SIM_MODES[0])
+        self.read_support = tk.StringVar(value=project_read_support(self.project_path.get()))
         self.status_var = tk.StringVar(value="就绪")
         self.active_controls = []
 
         self._build_ui()
 
-    def _build_ui(self):
-        self.root.configure(bg=BG_COLOR)
-        self._configure_styles()
+    def _font(self, size=10, bold=False):
+        return (self.font_name, size, "bold") if bold else (self.font_name, size)
 
+    def _build_ui(self):
+        self._configure_styles()
         shell = tk.Frame(self.root, bg=BG_COLOR)
-        shell.pack(fill=tk.BOTH, expand=True, padx=34, pady=22)
+        shell.pack(fill=tk.BOTH, expand=True, padx=22, pady=18)
         shell.columnconfigure(0, weight=1)
-        shell.rowconfigure(1, weight=1)
+        shell.rowconfigure(2, weight=1)
 
         self._build_header(shell)
-        self._build_main_panel(shell)
+        card = tk.Frame(shell, bg=SURFACE_COLOR, highlightbackground=BORDER_COLOR, highlightthickness=1)
+        card.grid(row=1, column=0, sticky="ew")
+        card.columnconfigure(1, weight=1)
+        self._build_form(card)
+        self._build_log(shell)
 
     def _configure_styles(self):
         style = ttk.Style()
@@ -131,224 +189,210 @@ class MipiAutoVerifyApp:
             style.theme_use("clam")
         except tk.TclError:
             pass
-
         style.configure(
             "Primary.TButton",
-            font=("TkDefaultFont", 10, "bold"),
-            padding=(14, 8),
+            font=self._font(10, True),
+            padding=(14, 7),
             foreground="#ffffff",
             background=BRAND_ORANGE,
             bordercolor=BRAND_ORANGE,
             focusthickness=0,
+            relief="flat",
         )
         style.map(
             "Primary.TButton",
-            background=[("active", BRAND_ORANGE_DARK), ("disabled", "#f2c979")],
-            bordercolor=[("active", BRAND_ORANGE_DARK)],
+            background=[("active", BRAND_ORANGE_DARK), ("disabled", "#f3c98a")],
+            bordercolor=[("active", BRAND_ORANGE_DARK), ("disabled", "#f3c98a")],
+            foreground=[("disabled", "#fff7eb")],
         )
         style.configure(
             "Secondary.TButton",
-            font=("TkDefaultFont", 10),
-            padding=(12, 8),
+            font=self._font(10),
+            padding=(12, 7),
             foreground=TEXT_COLOR,
             background="#f8fafc",
             bordercolor=BORDER_COLOR,
             focusthickness=0,
+            relief="flat",
         )
-        style.map("Secondary.TButton", background=[("active", "#edf2f7")])
-        style.configure("Field.TEntry", padding=(10, 8), fieldbackground="#ffffff")
-        style.configure("Field.TCombobox", padding=(10, 6), fieldbackground="#ffffff")
+        style.map("Secondary.TButton", background=[("active", "#eef2f6"), ("disabled", "#f8fafc")])
+        style.configure(
+            "Field.TEntry",
+            padding=(8, 7),
+            fieldbackground="#fbfcfe",
+            bordercolor=BORDER_COLOR,
+            lightcolor=BORDER_COLOR,
+            darkcolor=BORDER_COLOR,
+        )
+        style.configure(
+            "Field.TCombobox",
+            padding=(8, 6),
+            fieldbackground="#fbfcfe",
+            bordercolor=BORDER_COLOR,
+            arrowsize=14,
+        )
+        style.map("Field.TCombobox", fieldbackground=[("readonly", "#fbfcfe")])
 
     def _build_header(self, parent):
-        header = tk.Frame(parent, bg=BG_COLOR)
+        header = tk.Frame(parent, bg=INK)
         header.grid(row=0, column=0, sticky="ew", pady=(0, 14))
         header.columnconfigure(1, weight=1)
-
-        logo = tk.Canvas(header, width=150, height=46, bg=BG_COLOR, highlightthickness=0)
-        logo.grid(row=0, column=0, sticky="w")
-        logo.create_oval(2, 7, 36, 41, fill=BRAND_ORANGE, outline=BRAND_ORANGE)
-        logo.create_text(19, 24, text="L", fill="#ffffff", font=("TkDefaultFont", 18, "bold"))
-        logo.create_text(
-            86,
-            23,
-            text="Lansus",
-            fill=BRAND_ORANGE_DARK,
-            font=("TkDefaultFont", 22, "bold"),
+        mark = tk.Canvas(header, width=36, height=36, bg=INK, highlightthickness=0)
+        mark.grid(row=0, column=0, rowspan=2, padx=(16, 12), pady=14)
+        mark.create_oval(2, 2, 34, 34, fill=BRAND_ORANGE, outline=BRAND_ORANGE)
+        mark.create_text(18, 18, text="L", fill="#ffffff", font=self._font(14, True))
+        tk.Label(header, text="Lansus MIPI", bg=INK, fg="#ffffff", font=self._font(18, True), anchor="w").grid(
+            row=0, column=1, sticky="sw"
         )
-
-        title_box = tk.Frame(header, bg=BG_COLOR)
-        title_box.grid(row=0, column=1, sticky="ew", padx=(18, 0))
-        title_box.columnconfigure(0, weight=1)
         tk.Label(
-            title_box,
-            text="MIPI Automated Verification Platform",
-            bg=BG_COLOR,
-            fg=TEXT_COLOR,
-            font=("TkDefaultFont", 22, "bold"),
+            header,
+            text="生成激励、仿真环境和日志检查",
+            bg=INK,
+            fg="#9aa3b2",
+            font=self._font(10),
             anchor="w",
-        ).grid(row=0, column=0, sticky="ew")
-        tk.Label(
-            title_box,
-            text="在软件内生成激励、DET 和仿真环境，并收集、检查日志。",
-            bg=BG_COLOR,
-            fg=MUTED_COLOR,
-            font=("TkDefaultFont", 11),
-            anchor="w",
-        ).grid(row=1, column=0, sticky="ew", pady=(4, 0))
+        ).grid(row=1, column=1, sticky="nw", pady=(0, 12))
 
-    def _build_main_panel(self, parent):
-        panel = tk.Frame(parent, bg=SURFACE_COLOR, highlightbackground=BORDER_COLOR, highlightthickness=1)
-        panel.grid(row=1, column=0, sticky="nsew")
-        panel.columnconfigure(1, weight=1)
-
-        self._add_section_title(panel, 0, "工程")
-        self._add_entry_row(
-            panel,
+    def _build_form(self, parent):
+        self._section(parent, 0, "工程")
+        self._field(
+            parent,
             1,
             "工程目录",
             self.project_path,
-            [
-                ("选择", self.select_project, "Secondary.TButton"),
-                ("创建", self.create_project_dir, "Secondary.TButton"),
-            ],
+            [("选择", self.select_project, "Secondary.TButton"), ("创建", self.create_project_dir, "Secondary.TButton")],
         )
-        self._add_mode_row(panel, 2)
-
-        self._add_section_title(panel, 3, "流程")
-        self._add_entry_row(
-            panel,
+        self._pair_row(parent, 2)
+        self._section(parent, 3, "输入")
+        self._field(
+            parent,
             4,
             "寄存器表",
             self.register_path,
-            [
-                ("选择", self.select_register_file, "Secondary.TButton"),
-                ("1 生成激励", self.generate_cases, "Primary.TButton"),
-            ],
+            [("选择", self.select_register_file, "Secondary.TButton"), ("生成激励", self.generate_cases, "Primary.TButton")],
         )
-        self._add_entry_row(
-            panel,
+        self._field(
+            parent,
             5,
             "设计路径",
             self.design_path,
             [
                 ("目录", self.select_design_dir, "Secondary.TButton"),
                 ("文件", self.select_design_file, "Secondary.TButton"),
-                ("2 生成环境", self.generate_env, "Primary.TButton"),
+                ("生成环境", self.generate_env, "Primary.TButton"),
             ],
         )
-
-        actions = tk.Frame(panel, bg=SURFACE_COLOR)
-        actions.grid(row=6, column=0, columnspan=3, sticky="nw", padx=34, pady=(8, 0))
-        for text, command in (
-            ("生成连接", self.generate_connections),
-            ("仿真配置", self.edit_sim_config),
-            ("生成 DET", self.generate_det),
-            ("3 运行仿真", self.run_sim),
-            ("4 收集日志", self.collect_logs),
-            ("5 检查日志", self.check_logs),
+        actions = tk.Frame(parent, bg=SURFACE_COLOR)
+        actions.grid(row=6, column=0, columnspan=3, sticky="ew", padx=22, pady=(4, 16))
+        for text, command, style_name in (
+            ("生成连接", self.generate_connections, "Secondary.TButton"),
+            ("仿真配置", self.edit_sim_config, "Secondary.TButton"),
+            ("生成 DET", self.generate_det, "Secondary.TButton"),
+            ("运行仿真", self.run_sim, "Primary.TButton"),
+            ("收集日志", self.collect_logs, "Primary.TButton"),
+            ("检查日志", self.check_logs, "Primary.TButton"),
         ):
-            button = ttk.Button(actions, text=text, command=command, style="Primary.TButton")
-            button.pack(side=tk.LEFT, padx=(0, 10))
+            button = ttk.Button(actions, text=text, command=command, style=style_name)
+            button.pack(side=tk.LEFT, padx=(0, 8))
             self.active_controls.append(button)
 
-        self._add_result(panel, 7)
-        self._add_status_row(panel, 8)
-
-    def _add_section_title(self, parent, row, text):
+    def _section(self, parent, row, text):
         tk.Label(
             parent,
             text=text,
             bg=SURFACE_COLOR,
-            fg=BRAND_ORANGE_DARK,
-            font=("TkDefaultFont", 12, "bold"),
+            fg=MUTED_COLOR,
+            font=self._font(9, True),
             anchor="w",
-        ).grid(row=row, column=0, columnspan=3, sticky="ew", padx=34, pady=(16 if row else 18, 4))
+        ).grid(row=row, column=0, columnspan=3, sticky="ew", padx=22, pady=(14 if row else 16, 0))
 
-    def _add_label(self, parent, row, text):
-        tk.Label(
-            parent,
-            text=text,
-            bg=SURFACE_COLOR,
-            fg=TEXT_COLOR,
-            font=("TkDefaultFont", 11, "bold"),
-            anchor="w",
-        ).grid(row=row, column=0, sticky="ew", padx=(34, 18), pady=8)
-
-    def _add_entry_row(self, parent, row, label, variable, buttons):
-        self._add_label(parent, row, label)
+    def _field(self, parent, row, label, variable, buttons):
+        tk.Label(parent, text=label, bg=SURFACE_COLOR, fg=TEXT_COLOR, font=self._font(10), anchor="w", width=8).grid(
+            row=row, column=0, sticky="w", padx=(22, 10), pady=6
+        )
         entry = ttk.Entry(parent, textvariable=variable, style="Field.TEntry")
-        entry.grid(row=row, column=1, sticky="ew", pady=8)
+        entry.grid(row=row, column=1, sticky="ew", pady=6)
         self.active_controls.append(entry)
-
         box = tk.Frame(parent, bg=SURFACE_COLOR)
-        box.grid(row=row, column=2, sticky="e", padx=(12, 34), pady=8)
+        box.grid(row=row, column=2, sticky="e", padx=(10, 22), pady=6)
         for text, command, style_name in buttons:
             button = ttk.Button(box, text=text, command=command, style=style_name)
-            button.pack(side=tk.LEFT, padx=(8, 0))
+            button.pack(side=tk.LEFT, padx=(6, 0))
             self.active_controls.append(button)
 
-    def _add_mode_row(self, parent, row):
-        self._add_label(parent, row, "仿真模式")
-        combo = ttk.Combobox(
-            parent,
-            textvariable=self.mode_var,
-            values=SIM_MODES,
-            state="readonly",
-            style="Field.TCombobox",
-        )
-        combo.grid(row=row, column=1, sticky="ew", pady=8)
-        self.active_controls.append(combo)
+    def _pair_row(self, parent, row):
+        wrap = tk.Frame(parent, bg=SURFACE_COLOR)
+        wrap.grid(row=row, column=0, columnspan=3, sticky="ew", padx=22, pady=6)
+        tk.Label(wrap, text="仿真模式", bg=SURFACE_COLOR, fg=TEXT_COLOR, font=self._font(10)).pack(side=tk.LEFT)
+        mode = ttk.Combobox(wrap, textvariable=self.mode_var, values=SIM_MODES, state="readonly", width=16, style="Field.TCombobox")
+        mode.pack(side=tk.LEFT, padx=(10, 28))
+        tk.Label(wrap, text="支持读", bg=SURFACE_COLOR, fg=TEXT_COLOR, font=self._font(10)).pack(side=tk.LEFT)
+        read = ttk.Combobox(wrap, textvariable=self.read_support, values=("是", "否"), state="readonly", width=8, style="Field.TCombobox")
+        read.pack(side=tk.LEFT, padx=(10, 0))
+        read.bind("<<ComboboxSelected>>", self._store_read_choice)
+        self.active_controls.extend((mode, read))
 
-    def _add_result(self, parent, row):
-        frame = tk.Frame(parent, bg=SURFACE_COLOR)
-        frame.grid(row=row, column=0, columnspan=3, sticky="nsew", padx=34, pady=(12, 0))
+    def _build_log(self, parent):
+        frame = tk.Frame(parent, bg=SURFACE_COLOR, highlightbackground=BORDER_COLOR, highlightthickness=1)
+        frame.grid(row=2, column=0, sticky="nsew", pady=(14, 0))
         frame.columnconfigure(0, weight=1)
-        frame.rowconfigure(0, weight=1)
-        parent.rowconfigure(row, weight=1)
-
+        frame.rowconfigure(1, weight=1)
+        bar = tk.Frame(frame, bg=SURFACE_COLOR)
+        bar.grid(row=0, column=0, columnspan=2, sticky="ew")
+        tk.Label(bar, text="输出", bg=SURFACE_COLOR, fg=TEXT_COLOR, font=self._font(10, True)).pack(side=tk.LEFT, padx=16, pady=8)
+        self.status_dot = tk.Canvas(bar, width=12, height=12, bg=SURFACE_COLOR, highlightthickness=0)
+        self.status_dot.pack(side=tk.RIGHT, padx=(0, 8))
+        self.status_dot_item = self.status_dot.create_oval(1, 1, 11, 11, fill=BRAND_ORANGE, outline=BRAND_ORANGE)
+        tk.Label(bar, textvariable=self.status_var, bg=SURFACE_COLOR, fg=MUTED_COLOR, font=self._font(10)).pack(side=tk.RIGHT)
         self.result_text = tk.Text(
             frame,
             height=12,
             wrap=tk.WORD,
-            font=("TkFixedFont", 10),
-            bg="#0f172a",
-            fg="#e5e7eb",
+            font=(self.mono_name, 10),
+            bg=LOG_BG,
+            fg=LOG_FG,
             insertbackground="#ffffff",
             relief=tk.FLAT,
             borderwidth=0,
-            padx=14,
+            padx=16,
             pady=12,
         )
         self.result_text.tag_configure("loglink", foreground="#7dd3fc", underline=True)
         self.result_text.tag_bind("loglink", "<Button-1>", self._open_log_link)
         self.result_text.tag_bind("loglink", "<Enter>", lambda event: self.result_text.configure(cursor="hand2"))
         self.result_text.tag_bind("loglink", "<Leave>", lambda event: self.result_text.configure(cursor=""))
-        self.result_text.grid(row=0, column=0, sticky="nsew")
+        self.result_text.grid(row=1, column=0, sticky="nsew")
         scroll = ttk.Scrollbar(frame, command=self.result_text.yview)
-        scroll.grid(row=0, column=1, sticky="ns")
+        scroll.grid(row=1, column=1, sticky="ns")
         self.result_text.configure(yscrollcommand=scroll.set)
 
-    def _add_status_row(self, parent, row):
-        status_box = tk.Frame(parent, bg=SURFACE_COLOR)
-        status_box.grid(row=row, column=0, columnspan=3, sticky="ew", padx=34, pady=(12, 18))
-        self.status_dot = tk.Canvas(status_box, width=14, height=14, bg=SURFACE_COLOR, highlightthickness=0)
-        self.status_dot.grid(row=0, column=0, sticky="w", padx=(0, 8))
-        self.status_dot_item = self.status_dot.create_oval(2, 2, 12, 12, fill=BRAND_ORANGE, outline=BRAND_ORANGE)
-        tk.Label(
-            status_box,
-            textvariable=self.status_var,
-            bg=SURFACE_COLOR,
-            fg=MUTED_COLOR,
-            font=("TkDefaultFont", 10),
-            anchor="w",
-        ).grid(row=0, column=1, sticky="ew")
+    def _store_read_choice(self, _event=None):
+        store_read_support(self.project_path.get(), self.read_support.get())
+
+    def _reload_read_choice(self, folder):
+        self.read_support.set(project_read_support(folder))
 
     def select_project(self):
         current = self.project_path.get().strip()
         initial = current if Path(current).is_dir() else str(APP_DIR)
         path = filedialog.askdirectory(title="选择 python_sim_env 目录", initialdir=initial)
-        if path:
-            self.project_path.set(path)
+        if not path:
+            return
+        folder = Path(path)
+        if any(folder.iterdir()):
+            if not messagebox.askokcancel("工程目录", f"将清空目录中的全部内容:\n{folder}"):
+                return
+            try:
+                clear_directory(folder)
+            except OSError as exc:
+                messagebox.showerror("工程目录", str(exc))
+                return
+            self._set_status(f"已清空工程目录: {folder}", "#22c55e")
+        self.project_path.set(str(folder))
+        if (folder / "read_support.txt").is_file():
+            self._reload_read_choice(folder)
+        else:
+            store_read_support(folder, self.read_support.get())
 
     def create_project_dir(self):
         try:
@@ -357,6 +401,7 @@ class MipiAutoVerifyApp:
             messagebox.showerror("工程目录", str(exc))
             return
         self.project_path.set(str(folder))
+        store_read_support(folder, self.read_support.get())
         self._set_status(f"工程目录已就绪: {folder}", "#22c55e")
 
     def select_register_file(self):
@@ -388,7 +433,13 @@ class MipiAutoVerifyApp:
         if not register:
             messagebox.showerror("缺少寄存器表", "先选择寄存器 Excel。")
             return
-        self._start("正在生成激励...", lambda: generate_cases(project, register))
+        read_yes = self.read_support.get() != "否"
+        design = self.design_path.get().strip()
+        if not read_yes and not design:
+            messagebox.showerror("缺少设计路径", "不支持读时先填写设计路径，用来确定 regXX 输出。")
+            return
+        self._store_read_choice()
+        self._start("正在生成激励...", lambda: generate_cases(project, register, read_yes, design))
 
     def generate_env(self):
         project = self.project_path.get().strip()
@@ -410,7 +461,11 @@ class MipiAutoVerifyApp:
         self._start("正在生成连接...", lambda: self._write_connections(project, design))
 
     def _write_connections(self, project, design):
-        core, rffe, ports = sim_top_gen.update_rffe_instance(project, design)
+        self._store_read_choice()
+        if self.read_support.get() == "否":
+            core, rffe, ports = sim_top_gen.write_rffe_base_no_read(project, design)
+        else:
+            core, rffe, ports = sim_top_gen.update_rffe_instance(project, design)
         config = Path(project) / "sim_top" / "sim_config.v"
         if not config.is_file():
             sim_top_gen.write_sim_config(project, sim_top_gen.default_sim_config())
@@ -444,17 +499,21 @@ class MipiAutoVerifyApp:
         dialog.title("仿真配置")
         dialog.transient(self.root)
         dialog.grab_set()
-        dialog.configure(bg=SURFACE_COLOR)
+        dialog.configure(bg=BG_COLOR)
+        body = tk.Frame(dialog, bg=SURFACE_COLOR, highlightbackground=BORDER_COLOR, highlightthickness=1)
+        body.pack(fill=tk.BOTH, expand=True, padx=16, pady=16)
         fields = {}
         for index, (name, _default) in enumerate(sim_top_gen.SIM_CONFIG_FIELDS):
             row, column = divmod(index, 2)
-            tk.Label(dialog, text=name, bg=SURFACE_COLOR, fg=TEXT_COLOR, anchor="w").grid(
-                row=row, column=column * 2, sticky="w", padx=(16, 6), pady=4
+            tk.Label(body, text=name, bg=SURFACE_COLOR, fg=MUTED_COLOR, anchor="w", font=self._font(9)).grid(
+                row=row, column=column * 2, sticky="w", padx=(16, 8), pady=(10, 0)
             )
             variable = tk.StringVar(value=values.get(name, _default))
-            entry = ttk.Entry(dialog, textvariable=variable, width=18)
-            entry.grid(row=row, column=column * 2 + 1, sticky="ew", padx=(0, 16), pady=4)
+            entry = ttk.Entry(body, textvariable=variable, width=22, style="Field.TEntry")
+            entry.grid(row=row, column=column * 2 + 1, sticky="ew", padx=(0, 16), pady=(10, 0))
             fields[name] = variable
+        for column in (1, 3):
+            body.columnconfigure(column, weight=1)
         chosen = {"values": None}
 
         def save():
@@ -468,10 +527,10 @@ class MipiAutoVerifyApp:
             chosen["values"] = result
             dialog.destroy()
 
-        buttons = tk.Frame(dialog, bg=SURFACE_COLOR)
-        buttons.grid(row=8, column=0, columnspan=4, pady=12)
-        ttk.Button(buttons, text="保存", command=save).pack(side=tk.LEFT, padx=6)
-        ttk.Button(buttons, text="取消", command=dialog.destroy).pack(side=tk.LEFT, padx=6)
+        buttons = tk.Frame(body, bg=SURFACE_COLOR)
+        buttons.grid(row=8, column=0, columnspan=4, sticky="e", padx=16, pady=16)
+        ttk.Button(buttons, text="取消", command=dialog.destroy, style="Secondary.TButton").pack(side=tk.RIGHT)
+        ttk.Button(buttons, text="保存", command=save, style="Primary.TButton").pack(side=tk.RIGHT, padx=(0, 8))
         dialog.protocol("WM_DELETE_WINDOW", dialog.destroy)
         dialog.wait_window()
         return chosen["values"]

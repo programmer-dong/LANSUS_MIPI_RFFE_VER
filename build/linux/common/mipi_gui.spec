@@ -7,11 +7,14 @@ if target not in {"centos7", "rocky8"}:
     raise SystemExit("LANSUS_BUILD_TARGET 必须是 centos7 或 rocky8，当前为: %s" % target)
 
 root = Path.cwd()
+template = root / "templates" / "rffe_base.v"
+if not template.is_file():
+    raise SystemExit("缺少任务库模板: %s" % template)
 a = Analysis(
     [str(root / "mipi_gui.py")],
     pathex=[str(root)],
     binaries=[],
-    datas=[],
+    datas=[(str(template), "templates")],
     hiddenimports=["numpy", "pandas", "xlrd", "openpyxl", "sim_top_gen", "sim_flow", "gen_sim_case"],
     hookspath=[],
     hooksconfig={},

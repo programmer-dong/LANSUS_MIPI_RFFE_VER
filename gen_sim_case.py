@@ -1,5 +1,6 @@
 import os
 import random
+import re
 import shutil
 import pandas as pd
 import sys
@@ -23,6 +24,8 @@ MIPI_RESERVED_SET = {addr.lower() for addr in mipi_reserver_all_reg}
 
 # 运行时由 main() 注入的全局配置（保持与历史脚本兼容）
 first_style = second_style = loop_style = code_style = ""
+bus_read_supported = True
+output_reg_ports = set()
 trigger_0_mask = trigger_1_mask = trigger_2_mask = ""
 trigger_0_reg = trigger_1_reg = trigger_2_reg = ""
 ext_trigger_3_10 = ext_trigger_11_17 = ext_trigger_3_17 = {}
@@ -91,6 +94,23 @@ def has_reserved_bits(reg_key):
     return any(normalize_reg(reserved_key) == normalized_key for reserved_key in reg_reserved_dicr)
 
 
+def register_default_bits(reg_key):
+    normalized_key = normalize_reg(reg_key)
+    for key, value in default_value_dict.items():
+        if normalize_reg(key) == normalized_key:
+            return str(value).strip()
+    for key, rows in all_user_dicr.items():
+        if normalize_reg(key) != normalized_key:
+            continue
+        return "".join(str(row[4]).strip() for row in rows if len(row) > 4)
+    return ""
+
+
+def default_is_all_zero(reg_key):
+    bits = register_default_bits(reg_key)
+    return bool(bits) and set(bits) <= {"0"}
+
+
 def is_udr_rst_register(reg_key, reg_map=None):
     source = reg_map if isinstance(reg_map, dict) else all_user_dicr
     normalized_key = normalize_reg(reg_key)
@@ -101,13 +121,48 @@ def is_udr_rst_register(reg_key, reg_map=None):
     return False
 
 
-def emit_read_chk(file, chk_type, addr_hex, data_expr, reg_key):
+def _as_addr(addr):
+    if isinstance(addr, int):
+        return addr
+    text = str(addr).strip().lower()
+    if text.startswith("8'h"):
+        text = text[3:]
+    if text.startswith("0x"):
+        text = text[2:]
+    try:
+        return int(text, 16)
+    except ValueError:
+        return None
+
+
+def emit_value_read(file, legacy, addr, write_expr, expect_expr, extended=False):
+    if bus_read_supported:
+        file.write(legacy)
+        return
+    number = _as_addr(addr)
+    if number is None or number not in output_reg_ports or f"0x{number:02x}" in MIPI_RESERVED_SET:
+        return
+    task = "ext_reg_port_chk" if extended else "reg_port_chk"
+    indent = re.match(r"[ \t]*", legacy).group(0)
+    file.write(f"{indent}{task}(usid_user,8'h{number:02x},{write_expr},{expect_expr});{code_style}")
+
+
+def emit_read_chk(file, chk_type, addr_hex, data_expr, reg_key, write_expr=None):
     suffix = reserved_mask_for(reg_key)
-    if chk_type == "ext":
-        line = f"ext_reg_read_chk(usid_user,8'h{addr_hex},8'h00,{data_expr}{suffix});"
+    extended = chk_type == "ext"
+    expect = f"{data_expr}{suffix}"
+    if extended:
+        legacy = f"ext_reg_read_chk(usid_user,8'h{addr_hex},8'h00,{expect});" + code_style
     else:
-        line = f"reg_read_chk(usid_user,8'h{addr_hex},{data_expr}{suffix});"
-    file.write(line + code_style)
+        legacy = f"reg_read_chk(usid_user,8'h{addr_hex},{expect});" + code_style
+    emit_value_read(
+        file,
+        legacy,
+        addr_hex,
+        data_expr if write_expr is None else write_expr,
+        expect,
+        extended,
+    )
 
 
 def read_expected_with_reserved(reg_key, write_data):
@@ -189,7 +244,14 @@ def reset_reg1c(file):
         file.write("ext_reg_write(usid_user,8'h2d,8'h00,8'hff);" + code_style)
     if has_reg(mipi_reserved_reg, "0x30") or supports_ext_trigger_3_17():
         file.write("ext_reg_write(usid_user,8'h30,8'h00,8'hff);" + code_style)
-        file.write("ext_reg_read_chk(usid_user,8'h30,8'h00,9'h07f);" + code_style)
+        emit_value_read(
+            file,
+            "ext_reg_read_chk(usid_user,8'h30,8'h00,9'h07f);" + code_style,
+            "0x30",
+            "8'hff",
+            "9'h07f",
+            True,
+        )
 
 
 def finalize_sim_task(filename, strip_empty=True):
@@ -337,15 +399,22 @@ def read_other_reg(file, result_write_reg, ext_com_support, first_indent):
         decimal_number = int(reg_format, 16)
         reserved_write = reserved_mask_for(key_result)
         if decimal_number <= 31:
-            file.write(
-                loop_style + f"reg_read_chk(usid_user,8'h{reg_format},{value_result}{reserved_write});"
-                + code_style
+            emit_value_read(
+                file,
+                loop_style + f"reg_read_chk(usid_user,8'h{reg_format},{value_result}{reserved_write});" + code_style,
+                key_result,
+                value_result,
+                f"{value_result}{reserved_write}",
+                False,
             )
         elif decimal_number > 31 and ext_com_support == "support":
-            file.write(
-                loop_style
-                + f"ext_reg_read_chk(usid_user,8'h{reg_format},8'h00,{value_result}{reserved_write});"
-                + code_style
+            emit_value_read(
+                file,
+                loop_style + f"ext_reg_read_chk(usid_user,8'h{reg_format},8'h00,{value_result}{reserved_write});" + code_style,
+                key_result,
+                value_result,
+                f"{value_result}{reserved_write}",
+                True,
             )
     file.write(first_indent + "end" + code_style)
 
@@ -381,20 +450,41 @@ def check_mipi_default_value(all_trigger_dict, command_support):
             ("0x30", "ext_reg_read_chk(usid_user,8'h30,8'h00,{1'b0,8'h00});"),
         )
         for line in fixed_reads:
-            sim_defult_file.write(line + code_style)
+            emit_value_read(sim_defult_file, line + code_style, _as_addr(_addr_token(line)), "8'h00", "8'h00", False)
         for reg_key, line in optional_reads:
             if has_reg(mipi_reserved_reg, reg_key):
-                sim_defult_file.write(line + code_style)
+                emit_value_read(sim_defult_file, line + code_style, reg_key, "8'h00", "8'h00", True)
         sim_defult_file.write("\n" + "endtask" + "\n")
     finalize_sim_task("sim_default_value.v")
 
 
+def _addr_token(line):
+    match = re.search(r"8'h([0-9a-fA-F]+)", line)
+    return match.group(1) if match else ""
+
+
 def write_reg_chk(file, trigger_format, value_str, command_support):
     number_int = int(trigger_format, 16)
+    expect = f"9'b0{value_str}"
+    written = f"8'b{value_str}"
     if command_support == "support" and number_int > 31:
-        file.write(f"ext_reg_read_chk(usid_user,8'h{trigger_format}, 8'h00, 9'b0{value_str});\n" + "     ")
+        emit_value_read(
+            file,
+            f"ext_reg_read_chk(usid_user,8'h{trigger_format}, 8'h00, 9'b0{value_str});\n" + "     ",
+            trigger_format,
+            written,
+            expect,
+            True,
+        )
     elif number_int <= 31:
-        file.write(f"reg_read_chk(usid_user,8'h{trigger_format}, 9'b0{value_str});\n" + "     ")
+        emit_value_read(
+            file,
+            f"reg_read_chk(usid_user,8'h{trigger_format}, 9'b0{value_str});\n" + "     ",
+            trigger_format,
+            written,
+            expect,
+            False,
+        )
 
 
 
@@ -432,9 +522,9 @@ def reg_trigger_test(file, reg_single, trigger, command, write_data, trigger_bef
     file.write(f"//write data {write_data} by trigger{code_style}")
     file.write(f"reg_write(usid_user,8'h1c,{mask_val});{code_style}")
     _write_trigger_command(file, command, reg_format, write_data)
-    emit_read_chk(file, chk_type, read_addr, f"{trigger_before}{reg0_mask}", reg_single)
+    emit_read_chk(file, chk_type, read_addr, f"{trigger_before}{reg0_mask}", reg_single, write_data)
     file.write(f"reg_write(usid_user,8'h1c,{trigger_val});{code_style}")
-    emit_read_chk(file, chk_type, read_addr, f"{write_data}{reg0_mask}", reg_single)
+    emit_read_chk(file, chk_type, read_addr, f"{write_data}{reg0_mask}", reg_single, write_data)
 
 def write_spec_data(file, reg_single, tag):
     if has_reserved_bits(reg_single):
@@ -458,20 +548,57 @@ def write_spec_data(file, reg_single, tag):
         if tag == 7 :
             file.write(first_style + "masked_write(usid_user,8'h"+reg_format+","+write_data+");"+code_style)     
             mask = reserved_mask_for(reg_single)
+            written = write_data.split(",")[-1].strip()
+            expect = "{1'b0," + check_data + mask + "}"
             if decimal_number <= 31:
-                file.write(first_style+"reg_read_chk(usid_user,8'h"+reg_format+","+"{1'b0,"+check_data+mask+"});"+code_style)
+                emit_value_read(
+                    file,
+                    first_style+"reg_read_chk(usid_user,8'h"+reg_format+","+"{1'b0,"+check_data+mask+"});"+code_style,
+                    reg_single,
+                    written,
+                    expect,
+                    False,
+                )
             else:
-                file.write(first_style + "ext_reg_read_chk(usid_user,8'h" + reg_format + "," + "8'h00,{1'b0,"+check_data + mask+"});"+code_style)
+                emit_value_read(
+                    file,
+                    first_style + "ext_reg_read_chk(usid_user,8'h" + reg_format + "," + "8'h00,{1'b0,"+check_data + mask+"});"+code_style,
+                    reg_single,
+                    written,
+                    expect,
+                    True,
+                )
     for write_data, check_data in zip(write_data_list, read_check_list):
         if tag == 0:
             file.write(first_style + "reg0_write(usid_user," + write_data + ");\n" + "     ")
-            file.write(first_style + "reg_read_chk(usid_user,8'h00," + "{1'b0,"+write_data + "&8'h7f"+reserved_mask_for(reg_single)+"});\n" + "     ")
+            emit_value_read(
+                file,
+                first_style + "reg_read_chk(usid_user,8'h00," + "{1'b0,"+write_data + "&8'h7f"+reserved_mask_for(reg_single)+"});\n" + "     ",
+                "0x00",
+                write_data,
+                "{1'b0," + write_data + "&8'h7f" + reserved_mask_for(reg_single) + "}",
+                False,
+            )
         elif tag == 1:
             file.write(first_style + "reg_write(usid_user,8'h" + reg_format + "," + write_data + ");\n" + "     ")
-            file.write(first_style + "reg_read_chk(usid_user,8'h" + reg_format + "," + "{1'b0,"+write_data + reserved_mask_for(reg_single)+"});\n" + "     ")
+            emit_value_read(
+                file,
+                first_style + "reg_read_chk(usid_user,8'h" + reg_format + "," + "{1'b0,"+write_data + reserved_mask_for(reg_single)+"});\n" + "     ",
+                reg_single,
+                write_data,
+                "{1'b0," + write_data + reserved_mask_for(reg_single) + "}",
+                False,
+            )
         elif tag == 2:
             file.write(first_style + "ext_reg_write(usid_user,8'h" + reg_format + ",8'h00," + write_data + ");\n" + "     ")
-            file.write(first_style + "ext_reg_read_chk(usid_user,8'h" + reg_format + "," + "8'h00,{1'b0,"+write_data + reserved_mask_for(reg_single)+"});\n" + "     ")
+            emit_value_read(
+                file,
+                first_style + "ext_reg_read_chk(usid_user,8'h" + reg_format + "," + "8'h00,{1'b0,"+write_data + reserved_mask_for(reg_single)+"});\n" + "     ",
+                reg_single,
+                write_data,
+                "{1'b0," + write_data + reserved_mask_for(reg_single) + "}",
+                True,
+            )
         elif tag == 4 and "trigger" in trigger.lower():
             reg_trigger_test(file, reg_single, trigger, "reg0_write", write_data, check_data)
         elif tag == 5 and "trigger" in trigger.lower():
@@ -497,20 +624,38 @@ def usid_programmable_mode(mipi_reserved, command_support):
                 for i in range(1, 16):
                     sa_hex = hex(i)[2:].upper()
                     sim_usid_programmable_file.write(f"set_p1_sa(4'h{sa_hex});\n" + "     ")
-                    sim_usid_programmable_file.write(
-                        "reg_read_chk(usid_user,8'h1f,{man_id_user[11:8],4'h" + f"{sa_hex}}});\n" + "     ")
+                    emit_value_read(
+                        sim_usid_programmable_file,
+                        "reg_read_chk(usid_user,8'h1f,{man_id_user[11:8],4'h" + f"{sa_hex}}});\n" + "     ",
+                        "0x1f",
+                        "8'h00",
+                        "{man_id_user[11:8],4'h" + f"{sa_hex}}}",
+                        False,
+                    )
             elif mode == 2 and command_support == "support":
                 for i in range(1, 16):
                     sa_hex = hex(i)[2:].upper()
                     sim_usid_programmable_file.write(f"set_p2_sa(4'h{sa_hex});\n" + "     ")
-                    sim_usid_programmable_file.write(
-                        "ext_reg_read_chk(usid_user,8'h1f,8'h00,{man_id_user[11:8],4'h" + f"{sa_hex}}});\n" + "     ")
+                    emit_value_read(
+                        sim_usid_programmable_file,
+                        "ext_reg_read_chk(usid_user,8'h1f,8'h00,{man_id_user[11:8],4'h" + f"{sa_hex}}});\n" + "     ",
+                        "0x1f",
+                        "8'h00",
+                        "{man_id_user[11:8],4'h" + f"{sa_hex}}}",
+                        True,
+                    )
             elif mode == 3 and "0x20" in mipi_reserved and command_support == "support":
                 for i in range(1, 16):
                     sa_hex = hex(i)[2:].upper()
                     sim_usid_programmable_file.write(f"set_p3_sa(4'h{sa_hex});\n" + "     ")
-                    sim_usid_programmable_file.write(
-                        "ext_reg_read_chk(usid_user,8'h1f,8'h00,{man_id_user[11:8],4'h" + f"{sa_hex}}});\n" + "     ")
+                    emit_value_read(
+                        sim_usid_programmable_file,
+                        "ext_reg_read_chk(usid_user,8'h1f,8'h00,{man_id_user[11:8],4'h" + f"{sa_hex}}});\n" + "     ",
+                        "0x1f",
+                        "8'h00",
+                        "{man_id_user[11:8],4'h" + f"{sa_hex}}}",
+                        True,
+                    )
         reg_reset_command(sim_usid_programmable_file)
         sim_usid_programmable_file.write("\n" + "endtask" + "\n")
 
@@ -550,14 +695,21 @@ def _set_extended_trigger(file, all_reg_trigger, reg_addr, trigger_range, enable
     file.write(f"$display(\"****extended trigger {mode}****\");{code_style}")
     file.write(f"//============= trigger {trigger_range} ==============|0x{reg_addr.upper()}{code_style}")
     file.write(f"ext_reg_write(usid_user,8'h{reg_addr},8'h00,{write_val});\n     ")
-    file.write(f"ext_reg_read_chk(usid_user,8'h{reg_addr},8'h00,{read_val});\n     ")
+    emit_value_read(
+        file,
+        f"ext_reg_read_chk(usid_user,8'h{reg_addr},8'h00,{read_val});\n     ",
+        reg_addr,
+        write_val,
+        read_val,
+        True,
+    )
 
 
 def trigger_disable(file, all_reg_trigger):
     file.write("$display(\"****standard trigger disable****\");" + code_style)
     file.write("//============= trigger 0-2 ===============|0x1c" + code_style)
     file.write("reg_write(usid_user,8'h1c,8'hb8);\n     ")
-    file.write("reg_read_chk(usid_user,8'h1c,9'h0b8);\n     ")
+    emit_value_read(file, "reg_read_chk(usid_user,8'h1c,9'h0b8);\n     ", "0x1c", "8'hb8", "9'h0b8", False)
     _set_extended_trigger(file, all_reg_trigger, "2d", "3-10", enable=False)
     _set_extended_trigger(file, all_reg_trigger, "30", "11-17", enable=False)
 
@@ -566,7 +718,7 @@ def trigger_enable(file, all_reg_trigger):
     file.write("$display(\"****standard trigger enable****\");" + code_style)
     file.write("//============= trigger 0-2 ===============|0x1c" + code_style)
     file.write("reg_write(usid_user,8'h1c,8'h80);\n     ")
-    file.write("reg_read_chk(usid_user,8'h1c,9'h080);\n     ")
+    emit_value_read(file, "reg_read_chk(usid_user,8'h1c,9'h080);\n     ", "0x1c", "8'h80", "9'h080", False)
     _set_extended_trigger(file, all_reg_trigger, "2d", "3-10", enable=True)
     _set_extended_trigger(file, all_reg_trigger, "30", "11-17", enable=True)
 
@@ -576,7 +728,14 @@ def reg0_command_loop_body(file, usid_user, result_reg_dict, ext_com_support):
     file.write("    packet_rand.randomize();" + code_style)
     file.write("    data = packet_rand.data_packet;" + code_style)
     file.write("    reg0_write(usid_user,data);" + code_style)
-    file.write(first_style + "reg_read_chk(usid_user,8'h00,{1'b0,data&8'b0111_1111"+reserved_mask_for("0x00")+"});" + code_style)
+    emit_value_read(
+        file,
+        first_style + "reg_read_chk(usid_user,8'h00,{1'b0,data&8'b0111_1111"+reserved_mask_for("0x00")+"});" + code_style,
+        "0x00",
+        "data",
+        "{1'b0,data&8'b0111_1111" + reserved_mask_for("0x00") + "}",
+        False,
+    )
     read_other_reg(file, result_reg_dict, ext_com_support, first_style)
     file.write("end" + code_style)
     file.write("packet_rand = null;"+code_style)
@@ -591,15 +750,36 @@ def reg0_command_trigger_loop_body(file, usid_user, result_reg_dict, ext_com_sup
     file.write(first_style + "$display(\"****write data to reg00_shadow****\");" + code_style)
     file.write(first_style + "reg0_write(usid_user,data);" + code_style)
     file.write(first_style + "if(i==0)begin" + code_style)
-    file.write(loop_style + "reg_read_chk(usid_user,8'h00,{1'b0,8'h00});" + code_style)
+    emit_value_read(
+        file,
+        loop_style + "reg_read_chk(usid_user,8'h00,{1'b0,8'h00});" + code_style,
+        "0x00",
+        "data",
+        "{1'b0,8'h00}",
+        False,
+    )
     file.write(first_style + "end" + code_style)
     file.write(first_style + "else begin" + code_style)
-    file.write(loop_style + "reg_read_chk(usid_user,8'h00,{1'b0,(data_pre)&(8'b0111_1111)"+reserved_mask_for("0x00")+"});" + code_style)
+    emit_value_read(
+        file,
+        loop_style + "reg_read_chk(usid_user,8'h00,{1'b0,(data_pre)&(8'b0111_1111)"+reserved_mask_for("0x00")+"});" + code_style,
+        "0x00",
+        "data",
+        "{1'b0,(data_pre)&(8'b0111_1111)" + reserved_mask_for("0x00") + "}",
+        False,
+    )
     file.write(first_style + "end" + code_style)
     file.write(first_style + "$display(\"****trigger data to reg00_direct****\");" + code_style)
     emit_trigger_comment(file, trigger_list[1])
     file.write(first_style + "reg_write(usid_user,8'h1c," + trigger_list[1] + ");" + code_style)
-    file.write(first_style + "reg_read_chk(usid_user,8'h00,{1'b0,data&8'b0111_1111"+reserved_mask_for("0x00")+"});" + code_style)
+    emit_value_read(
+        file,
+        first_style + "reg_read_chk(usid_user,8'h00,{1'b0,data&8'b0111_1111"+reserved_mask_for("0x00")+"});" + code_style,
+        "0x00",
+        "data",
+        "{1'b0,data&8'b0111_1111" + reserved_mask_for("0x00") + "}",
+        False,
+    )
     file.write(first_style + "data_pre = data;" + code_style)
     read_other_reg(file, result_reg_dict, ext_com_support, first_style)
     file.write("end" + code_style)
@@ -616,7 +796,14 @@ def reg_command_loop_body(file, usid_user, each_reg, result_reg_dict, ext_com_su
         file.write("    packet_rand.randomize();" + code_style)
         file.write("    data = packet_rand.data_packet;" + code_style)
         file.write("    reg_write(" + usid_user + ",8'h" + reg_format + ",data);" + code_style)
-        file.write("    reg_read_chk(usid_user,8'h" + reg_format + ",{1'b0,data"+reserved_mask_for(each_reg)+"});" + code_style)
+        emit_value_read(
+            file,
+            "    reg_read_chk(usid_user,8'h" + reg_format + ",{1'b0,data"+reserved_mask_for(each_reg)+"});" + code_style,
+            each_reg,
+            "data",
+            "{1'b0,data" + reserved_mask_for(each_reg) + "}",
+            False,
+        )
         read_other_reg(file, result_reg_dict, ext_com_support, first_style)
         file.write("end" + code_style)
         file.write("packet_rand = null;"+code_style)
@@ -634,15 +821,36 @@ def reg_command_trigger_loop_body(file, usid_user, each_reg, result_reg_dict, ex
     file.write(first_style + "$display(\"****write data to reg"+reg_format+"_shadow****\");" + code_style)
     file.write(first_style + "reg_write(usid_user,8'h" + reg_format + ",data);" + code_style)
     file.write(first_style + "if(i==0)begin" + code_style)
-    file.write(loop_style + "reg_read_chk(usid_user,8'h"+reg_format+",{1'b0,8'h00});" + code_style)
+    emit_value_read(
+        file,
+        loop_style + "reg_read_chk(usid_user,8'h"+reg_format+",{1'b0,8'h00});" + code_style,
+        each_reg,
+        "data",
+        "{1'b0,8'h00}",
+        False,
+    )
     file.write(first_style + "end" + code_style)
     file.write(first_style + "else begin" + code_style)
-    file.write(loop_style + "reg_read_chk(usid_user,8'h"+reg_format+",{1'b0,data_pre"+reserved_mask_for(each_reg)+"});" + code_style)
+    emit_value_read(
+        file,
+        loop_style + "reg_read_chk(usid_user,8'h"+reg_format+",{1'b0,data_pre"+reserved_mask_for(each_reg)+"});" + code_style,
+        each_reg,
+        "data",
+        "{1'b0,data_pre" + reserved_mask_for(each_reg) + "}",
+        False,
+    )
     file.write(first_style + "end" + code_style)
     file.write(first_style + "$display(\"****trigger data to reg"+reg_format+"_direct****\");" + code_style)
     emit_trigger_comment(file, trigger_list[1])
     file.write(first_style + "reg_write("+ usid_user + ",8'h1c," + trigger_list[1] + ");" + code_style)
-    file.write(first_style + "reg_read_chk(usid_user,8'h" + reg_format + ",{1'b0,data"+reserved_mask_for(each_reg)+"});" + code_style)
+    emit_value_read(
+        file,
+        first_style + "reg_read_chk(usid_user,8'h" + reg_format + ",{1'b0,data"+reserved_mask_for(each_reg)+"});" + code_style,
+        each_reg,
+        "data",
+        "{1'b0,data" + reserved_mask_for(each_reg) + "}",
+        False,
+    )
     file.write(first_style + "data_pre = data;" + code_style)
     read_other_reg(file, result_reg_dict, ext_com_support, first_style)
     file.write("end" + code_style)
@@ -657,7 +865,14 @@ def ext_command_loop_body(file, usid_user, each_reg, result_reg_dict, ext_com_su
     file.write("    packet_rand.randomize();" + code_style)
     file.write("    data = packet_rand.data_packet;" + code_style)
     file.write("    ext_reg_write(" + usid_user + ",8'h" + reg_format + ",8'h00,data);" + code_style)
-    file.write("    ext_reg_read_chk(usid_user,8'h" + reg_format + ",8'h00,{1'b0,data"+reserved_mask_for(each_reg)+"});" + code_style)
+    emit_value_read(
+        file,
+        "    ext_reg_read_chk(usid_user,8'h" + reg_format + ",8'h00,{1'b0,data"+reserved_mask_for(each_reg)+"});" + code_style,
+        each_reg,
+        "data",
+        "{1'b0,data" + reserved_mask_for(each_reg) + "}",
+        True,
+    )
     read_other_reg(file, result_reg_dict, ext_com_support, first_style)
     file.write("end" + code_style)
     file.write("packet_rand = null;"+code_style)
@@ -676,27 +891,41 @@ def ext_command_trigger_loop_body(file, usid_user, each_reg, result_reg_dict, ex
     file.write(first_style + "$display(\"****write data to reg"+reg_format+"_shadow****\");" + code_style)
     file.write(first_style + write_command[0] +"(usid_user,8'h" + reg_format + ",8'h00,data);" + code_style)
     file.write(first_style + "if(i==0)begin" + code_style)
-    file.write(loop_style + write_command[1] +"(usid_user,8'h"+reg_format+",8'h00,{1'b0,8'h00});" + code_style)
+    emit_value_read(
+        file,
+        loop_style + write_command[1] +"(usid_user,8'h"+reg_format+",8'h00,{1'b0,8'h00});" + code_style,
+        each_reg,
+        "data",
+        "{1'b0,8'h00}",
+        True,
+    )
     file.write(first_style + "end" + code_style)
     file.write(first_style + "else begin" + code_style)
-    file.write(loop_style +  write_command[1] + "(usid_user,8'h"+reg_format+",8'h00,{1'b0,(data_pre)"+reserved_mask_for(each_reg)+"});" + code_style)
+    emit_value_read(
+        file,
+        loop_style +  write_command[1] + "(usid_user,8'h"+reg_format+",8'h00,{1'b0,(data_pre)"+reserved_mask_for(each_reg)+"});" + code_style,
+        each_reg,
+        "data",
+        "{1'b0,(data_pre)" + reserved_mask_for(each_reg) + "}",
+        True,
+    )
     file.write(first_style + "end" + code_style)
     file.write(first_style + "$display(\"****trigger data to reg"+reg_format+"_direct****\");" + code_style)
     emit_trigger_comment(file, trigger_list[1])
     file.write(first_style + "reg_write(usid_user,8'h1c," + trigger_list[1] + ");" + code_style)
-    file.write(first_style +  write_command[1] + "(usid_user,8'h" + reg_format + ",8'h00,{1'b0,data"+reserved_mask_for(each_reg)+"});" + code_style)
+    emit_value_read(
+        file,
+        first_style +  write_command[1] + "(usid_user,8'h" + reg_format + ",8'h00,{1'b0,data"+reserved_mask_for(each_reg)+"});" + code_style,
+        each_reg,
+        "data",
+        "{1'b0,data" + reserved_mask_for(each_reg) + "}",
+        True,
+    )
     file.write(first_style + "data_pre = data;" + code_style)
     read_other_reg(file, result_reg_dict, ext_com_support, first_style)
     file.write("end" + code_style)
     file.write("packet_rand = null;"+code_style)
     reset_reg1c(file)
-
-def _masked_read_line(reg_format, each_reg, extended):
-    payload = "{1'b0,masked_result" + reserved_mask_for(each_reg) + "}"
-    if extended:
-        return "    ext_reg_read_chk(usid_user,8'h" + reg_format + ",8'h00," + payload + ");"
-    return "    reg_read_chk(usid_user,8'h" + reg_format + "," + payload + ");"
-
 
 def _write_masked_loop(file, each_reg, reg_format, extended, result_reg_dict, ext_com_support, before_read=None):
     file.write("data_pre = 8'b" + default_value_dict[each_reg] + ";" + code_style)
@@ -712,7 +941,12 @@ def _write_masked_loop(file, each_reg, reg_format, extended, result_reg_dict, ex
     file.write("    masked_write(usid_user,8'h" + reg_format + ",data[7:0],data_two[7:0]);" + code_style)
     if before_read:
         before_read()
-    file.write(_masked_read_line(reg_format, each_reg, extended) + code_style)
+    payload = "{1'b0,masked_result" + reserved_mask_for(each_reg) + "}"
+    if extended:
+        legacy = "    ext_reg_read_chk(usid_user,8'h" + reg_format + ",8'h00," + payload + ");" + code_style
+    else:
+        legacy = "    reg_read_chk(usid_user,8'h" + reg_format + "," + payload + ");" + code_style
+    emit_value_read(file, legacy, each_reg, "data_two", payload, extended)
     file.write("    data_pre = masked_result;" + code_style)
     if before_read:
         file.write("\n     ")
@@ -729,7 +963,7 @@ def masked_write_command_loop_body(file, usid_user, each_reg, result_reg_dict, e
     extended = reg_decimal(each_reg) > 31
     if extended and ext_com_support != "support":
         return
-    if not skip_special_values:
+    if not skip_special_values and default_is_all_zero(each_reg):
         write_spec_data(file, each_reg, 7)
     _write_masked_loop(file, each_reg, reg_format, extended, result_reg_dict, ext_com_support)
     file.write("reg_write(usid_user,8'h1c,8'h40);" + code_style)
@@ -747,7 +981,7 @@ def masked_write_command_trigger_loop_body(file, usid_user, each_reg, result_reg
     file.write("$display(\"*****standard trigger enble*****\");" + code_style)
     file.write("//============= trigger 0-2 ===============|0x1c" + code_style)
     file.write("reg_write(usid_user,8'h1c,8'h80);" + code_style)
-    file.write("reg_read_chk(usid_user,8'h1c,9'h080);" + code_style)
+    emit_value_read(file, "reg_read_chk(usid_user,8'h1c,9'h080);" + code_style, "0x1c", "8'h80", "9'h080", False)
     file.write("// reg" + reg_format + code_style)
     file.write("$display(\"****reg" + reg_format + " trigger test****\");" + code_style)
 
@@ -765,10 +999,24 @@ def _emit_ext_trigger_arm(file, tri_reg, tri_mask, reg_format_udr, reg_value, re
     file.write("// trigger_mask_" + tri_mask.split("_")[1] + code_style)
     if tri_mask in ext_trigger_3_10:
         file.write("ext_reg_write(usid_user,8'h2d,8'h00," + tri_reg[0] + ");" + code_style)
-        file.write("ext_reg_read_chk(usid_user,8'h2d,8'h00," + tri_reg[0] + ");" + code_style)
+        emit_value_read(
+            file,
+            "ext_reg_read_chk(usid_user,8'h2d,8'h00," + tri_reg[0] + ");" + code_style,
+            "0x2d",
+            tri_reg[0],
+            tri_reg[0],
+            True,
+        )
     elif tri_mask in ext_trigger_11_17:
         file.write("ext_reg_write(usid_user,8'h30,8'h00," + tri_reg[0] + ");" + code_style)
-        file.write("ext_reg_read_chk(usid_user,8'h30,8'h00," + tri_reg[0] + ");" + code_style)
+        emit_value_read(
+            file,
+            "ext_reg_read_chk(usid_user,8'h30,8'h00," + tri_reg[0] + ");" + code_style,
+            "0x30",
+            tri_reg[0],
+            tri_reg[0],
+            True,
+        )
     file.write("$display(\"****select reg" + reg_format_udr + " trigger is " + tri_mask + "****\");" + code_style)
     udr_bits = ext_udr_mapped[tri_mask]
     if reg_value[1] in ("3:0", "3：0"):
@@ -779,7 +1027,14 @@ def _emit_ext_trigger_arm(file, tri_reg, tri_mask, reg_format_udr, reg_value, re
         field = ""
     if field:
         file.write("ext_reg_write(usid_user,8'h" + reg_format_udr + ",8'h00," + field + ");" + code_style)
-        file.write("ext_reg_read_chk(usid_user,8'h" + reg_format_udr + ",8'h00," + field + ");" + code_style)
+        emit_value_read(
+            file,
+            "ext_reg_read_chk(usid_user,8'h" + reg_format_udr + ",8'h00," + field + ");" + code_style,
+            reg_format_udr,
+            field,
+            field,
+            True,
+        )
     file.write("// reg" + reg_format_user + code_style)
     file.write("$display(\"****reg" + reg_format_user + " ext_trigger test****\");" + code_style)
     file.write("packet_rand = new(" + str(generate_random_integer()) + ");" + code_style)
@@ -788,10 +1043,24 @@ def _emit_ext_trigger_arm(file, tri_reg, tri_mask, reg_format_udr, reg_value, re
     file.write(first_style + "data = packet_rand.data_packet;" + code_style)
     file.write(first_style + "ext_reg_write(usid_user,8'h" + reg_format_user + ",8'h00,data);" + code_style)
     file.write(first_style + "if(i==0) begin" + code_style)
-    file.write(loop_style + "ext_reg_read_chk(usid_user,8'h" + reg_format_user + ",8'h00,{1'b0,9'h000});" + code_style)
+    emit_value_read(
+        file,
+        loop_style + "ext_reg_read_chk(usid_user,8'h" + reg_format_user + ",8'h00,{1'b0,9'h000});" + code_style,
+        reg_format_user,
+        "data",
+        "{1'b0,9'h000}",
+        True,
+    )
     file.write(first_style + "end" + code_style)
     file.write(first_style + "else begin" + code_style)
-    file.write(loop_style + "ext_reg_read_chk(usid_user,8'h" + reg_format_user + ",8'h00,{1'b0,data_pre});" + code_style)
+    emit_value_read(
+        file,
+        loop_style + "ext_reg_read_chk(usid_user,8'h" + reg_format_user + ",8'h00,{1'b0,data_pre});" + code_style,
+        reg_format_user,
+        "data",
+        "{1'b0,data_pre}",
+        True,
+    )
     file.write(first_style + "end" + code_style)
 
 
@@ -810,12 +1079,26 @@ def extended_trigger_loop_body(file, usid_user, tri_reg, tri_mask, reg_format_ud
         file.write(first_style + "ext_reg_write(usid_user,8'h2e,8'h00," + tri_reg[1] + ");" + code_style)
     elif tri_mask in ext_trigger_11_17:
         file.write(first_style + "ext_reg_write(usid_user,8'h2f,8'h00, " + tri_reg[1] + ");" + code_style)
-    file.write(first_style + "ext_reg_read_chk(usid_user,8'h" + reg_format_user + ",8'h00,data);" + code_style)
+    emit_value_read(
+        file,
+        first_style + "ext_reg_read_chk(usid_user,8'h" + reg_format_user + ",8'h00,data);" + code_style,
+        reg_format_user,
+        "data",
+        "data",
+        True,
+    )
     _emit_ext_trigger_tail(file, tri_mask)
 
-def write_read_chk(file, reg_tri_cnt, number):  
-    cmd = first_style + "ext_reg_read_chk(usid_user,8'h{:02x},8'h00,9'h{:03x});".format(int(reg_tri_cnt, 16), number)  
-    file.write(cmd + '\n' + "     ")  
+def write_read_chk(file, reg_tri_cnt, number):
+    cmd = first_style + "ext_reg_read_chk(usid_user,8'h{:02x},8'h00,9'h{:03x});".format(int(reg_tri_cnt, 16), number)
+    emit_value_read(
+        file,
+        cmd + '\n' + "     ",
+        reg_tri_cnt,
+        "8'h00",
+        "9'h{:03x}".format(number),
+        True,
+    )  
   
 def timed_trigger_cnt(file, reg_tri_cnt, number):  
     number = int(number)  
@@ -852,7 +1135,14 @@ def extended_timed_trigger_loop_body(file, usid_user, tri_reg, tri_mask, reg_for
     if cnt_reg:
         timed_trigger_cnt(file, cnt_reg.replace("8'h", ""), random.randint(0, 255))
     file.write(first_style + "// read " + reg_format_user + code_style)
-    file.write(first_style + "ext_reg_read_chk(usid_user,8'h" + reg_format_user + ",8'h00,data);" + code_style)
+    emit_value_read(
+        file,
+        first_style + "ext_reg_read_chk(usid_user,8'h" + reg_format_user + ",8'h00,data);" + code_style,
+        reg_format_user,
+        "data",
+        "data",
+        True,
+    )
     _emit_ext_trigger_tail(file, tri_mask)
     file.write("\n" + code_style)
 
@@ -886,7 +1176,14 @@ def sim_reg1d_reg1e_reg1f_reg(file, usid_user, each_reg):
         "0x1f": "{1'b0,man_id_user[11:8], usid_user}",
     }.get(each_reg.lower())
     if readback:
-        file.write("    reg_read_chk(usid_user,8'h" + reg_format + "," + readback + ");" + code_style)
+        emit_value_read(
+            file,
+            "    reg_read_chk(usid_user,8'h" + reg_format + "," + readback + ");" + code_style,
+            each_reg,
+            "data",
+            readback,
+            False,
+        )
     read_other_reg(file, result_reg_dict, extended_command, "")
     file.write("end" + code_style)
     file.write("packet_rand = null;"+code_style)
@@ -916,7 +1213,14 @@ def sim_reg20_to_reg30_reg(file, usid_user, each_reg):
         "0x30": "{1'b0,data" + reserved_mask_for("0x30") + "}",
     }.get(each_reg.lower())
     if readback:
-        file.write("    ext_reg_read_chk(usid_user,8'h" + reg_format + ",8'h00," + readback + ");" + code_style)
+        emit_value_read(
+            file,
+            "    ext_reg_read_chk(usid_user,8'h" + reg_format + ",8'h00," + readback + ");" + code_style,
+            each_reg,
+            "data",
+            readback,
+            True,
+        )
     if each_reg.lower() != '0x23':
         read_other_reg(file, result_reg_dict, extended_command, "")
     file.write("end" + code_style)
@@ -929,7 +1233,14 @@ def sim_reg31_to_reg3f(file, usid_user, time_reg_list):
         file.write("begin"+code_style)
         file.write(first_style +"ext_reg_write(usid_user,8'h"+reg_format+",8'h00,8'ha0);"+code_style)
         for count in ("95", "84", "74", "63", "53", "42", "32", "21", "11", "00"):
-            file.write(first_style + "ext_reg_read_chk(usid_user,8'h" + reg_format + ",8'h00,{1'b0,8'h" + count + "});" + code_style)
+            emit_value_read(
+                file,
+                first_style + "ext_reg_read_chk(usid_user,8'h" + reg_format + ",8'h00,{1'b0,8'h" + count + "});" + code_style,
+                each_reg,
+                "8'ha0",
+                "{1'b0,8'h" + count + "}",
+                True,
+            )
         file.write("end" + code_style)
 
 
@@ -939,14 +1250,29 @@ def _emit_err_seq(file, label, write_fn, err_fn, read_fn, write_addr, read_addr,
     read_55 = read_expected_with_reserved(reg_key, "8'h55")
     read_66 = read_expected_with_reserved(reg_key, "8'h66")
     file.write(f"$display(\"****{label}****\");" + code_style)
+    extended = read_fn.startswith("ext_")
     file.write(f"{write_fn}(usid_user,{write_addr}8'h55);" + code_style)
-    file.write(f"{read_fn}(usid_user,{read_addr}{read_55});" + code_style)
+    emit_value_read(file, f"{read_fn}(usid_user,{read_addr}{read_55});" + code_style, reg_key, "8'h55", read_55, extended)
     file.write(f"{err_fn}(usid_user,{write_addr}8'h66);" + code_style)
-    file.write(f"{read_fn}(usid_user,{read_addr}{read_55});" + code_style)
+    emit_value_read(file, f"{read_fn}(usid_user,{read_addr}{read_55});" + code_style, reg_key, "8'h66", read_55, extended)
     file.write(f"{write_fn}(usid_user,{write_addr}8'h66);" + code_style)
-    file.write(f"{read_fn}(usid_user,{read_addr}{read_66});" + code_style)
-    file.write(f"ext_reg_read_chk(usid_user,sum_err_addr,8'h00,{sum_bits});" + code_style)
-    file.write("ext_reg_read_chk(usid_user,sum_err_addr,8'h00,9'b00000_0000);" + code_style)
+    emit_value_read(file, f"{read_fn}(usid_user,{read_addr}{read_66});" + code_style, reg_key, "8'h66", read_66, extended)
+    emit_value_read(
+        file,
+        f"ext_reg_read_chk(usid_user,sum_err_addr,8'h00,{sum_bits});" + code_style,
+        "0x24",
+        "8'h00",
+        sum_bits,
+        True,
+    )
+    emit_value_read(
+        file,
+        "ext_reg_read_chk(usid_user,sum_err_addr,8'h00,9'b00000_0000);" + code_style,
+        "0x24",
+        "8'h00",
+        "9'b00000_0000",
+        True,
+    )
 
 
 def _emit_err_reg(file, first_reg, key, err_fn, label, sum_bits):
@@ -1024,9 +1350,9 @@ def sim_error_test():
         sim_err.write("\n")
         display_start_fun(sim_err, "read using the  bsid or gsid")
         sim_err.write("$display(\"****reg_read use the bsid error****\");" + code_style)
-        sim_err.write("reg_read_chk(4'h0,8'h1c,`NRF);" + code_style)
-        sim_err.write("ext_reg_read_chk(usid_user,sum_err_addr,8'h00,9'b00000_0001);"+code_style)
-        sim_err.write("ext_reg_read_chk(usid_user,sum_err_addr,8'h00,9'b00000_0000);"+code_style)
+        emit_value_read(sim_err, "reg_read_chk(4'h0,8'h1c,`NRF);" + code_style, "0x1c", "8'h00", "`NRF", False)
+        emit_value_read(sim_err, "ext_reg_read_chk(usid_user,sum_err_addr,8'h00,9'b00000_0001);"+code_style, "0x24", "8'h00", "9'b00000_0001", True)
+        emit_value_read(sim_err, "ext_reg_read_chk(usid_user,sum_err_addr,8'h00,9'b00000_0000);"+code_style, "0x24", "8'h00", "9'b00000_0000", True)
         reg_reset_command(sim_err)
         sim_err.write("\n" + "endtask" + "\n")
     finalize_sim_task("sim_error_test.v")
@@ -1392,7 +1718,14 @@ def sim_ext_write_more_reg_no_tri():
 
                 sim_reg.write("$display(\"/// write " + str(length) + " registers from 0x" + start_reg + " ///\");" + code_style)
                 sim_reg.write("ext_reg_write(usid_user,8'h" + start_reg + ",8'h" + len_field + ",{" + write_data_str + "});" + code_style)
-                sim_reg.write("ext_reg_read_chk(usid_user,8'h" + start_reg + ",8'h" + len_field + ",{" + expected_data_str + "});" + code_style)
+                legacy = "ext_reg_read_chk(usid_user,8'h" + start_reg + ",8'h" + len_field + ",{" + expected_data_str + "});" + code_style
+                if bus_read_supported:
+                    sim_reg.write(legacy)
+                else:
+                    for reg_key, one_write, one_expect in zip(reg_range, write_data_list, expected_data):
+                        if one_expect == "`NRF":
+                            continue
+                        emit_value_read(sim_reg, legacy, reg_key, one_write, one_expect, True)
 
         sim_reg.write("$display(\"/// unused position coverage: head / middle / tail ///\");" + code_style)
         for window_kind, addr_list in build_unused_windows(user_reg_addrs):
@@ -1415,7 +1748,14 @@ def sim_ext_write_more_reg_no_tri():
 
             sim_reg.write("$display(\"/// " + window_kind + ": " + window_desc + " ///\");" + code_style)
             sim_reg.write("ext_reg_write(usid_user,8'h" + start_reg + ",8'h" + len_field + ",{" + write_data_str + "});" + code_style)
-            sim_reg.write("ext_reg_read_chk(usid_user,8'h" + start_reg + ",8'h" + len_field + ",{" + expected_data_str + "});" + code_style)
+            legacy = "ext_reg_read_chk(usid_user,8'h" + start_reg + ",8'h" + len_field + ",{" + expected_data_str + "});" + code_style
+            if bus_read_supported:
+                sim_reg.write(legacy)
+            else:
+                for reg_key, one_write, one_expect in zip(reg_range, write_data_list, expected_data):
+                    if one_expect == "`NRF":
+                        continue
+                    emit_value_read(sim_reg, legacy, reg_key, one_write, one_expect, True)
 
         reg_reset_command(sim_reg)
         sim_reg.write("\n" + "endtask" + "\n")
@@ -1451,14 +1791,31 @@ def sim_write_unused_reg():
                 sim_unused.write(first_style + "packet_rand.randomize();" + code_style)
                 sim_unused.write(first_style + "data = packet_rand.data_packet;" + code_style)
                 sim_unused.write(first_style + "reg_write(usid_user,8'h" + reg_format + ",data);" + code_style)
-                sim_unused.write(first_style + "reg_read_chk(usid_user,8'h" + reg_format + ",{1'b0,data" + reserved_mask_for(key_reg) + "});" + code_style)
+                expect = "{1'b0,data" + reserved_mask_for(key_reg) + "}"
+                emit_value_read(
+                    sim_unused,
+                    first_style + "reg_read_chk(usid_user,8'h" + reg_format + ",{1'b0,data" + reserved_mask_for(key_reg) + "});" + code_style,
+                    key_reg,
+                    "data",
+                    expect,
+                    False,
+                )
                 if unused_addr < 28:
                     sim_unused.write(first_style + "reg_write(usid_user,8'h" + unused_format + ",data);" + code_style)
-                    sim_unused.write(first_style + "reg_read_chk(usid_user,8'h" + unused_format + ",{1'b1,8'h00});" + code_style)
+                    if bus_read_supported:
+                        sim_unused.write(first_style + "reg_read_chk(usid_user,8'h" + unused_format + ",{1'b1,8'h00});" + code_style)
                 elif extended_command == "support":
                     sim_unused.write(first_style + "ext_reg_write(usid_user,8'h" + unused_format + ",8'h00,data);" + code_style)
-                    sim_unused.write(first_style + "ext_reg_read_chk(usid_user,8'h" + unused_format + ",8'h00,{1'b1,8'h00});" + code_style)
-                sim_unused.write(first_style + "reg_read_chk(usid_user,8'h" + reg_format + ",{1'b0,data" + reserved_mask_for(key_reg) + "});" + code_style)
+                    if bus_read_supported:
+                        sim_unused.write(first_style + "ext_reg_read_chk(usid_user,8'h" + unused_format + ",8'h00,{1'b1,8'h00});" + code_style)
+                emit_value_read(
+                    sim_unused,
+                    first_style + "reg_read_chk(usid_user,8'h" + reg_format + ",{1'b0,data" + reserved_mask_for(key_reg) + "});" + code_style,
+                    key_reg,
+                    "data",
+                    expect,
+                    False,
+                )
                 sim_unused.write("end" + code_style)
                 sim_unused.write("packet_rand = null;" + code_style)
             elif extended_command == "support":
@@ -1468,14 +1825,31 @@ def sim_write_unused_reg():
                 sim_unused.write(first_style + "packet_rand.randomize();" + code_style)
                 sim_unused.write(first_style + "data = packet_rand.data_packet;" + code_style)
                 sim_unused.write(first_style + "ext_reg_write(usid_user,8'h" + reg_format + ",8'h00,data);" + code_style)
-                sim_unused.write(first_style + "ext_reg_read_chk(usid_user,8'h" + reg_format + ",8'h00,{1'b0,data" + reserved_mask_for(key_reg) + "});" + code_style)
+                expect = "{1'b0,data" + reserved_mask_for(key_reg) + "}"
+                emit_value_read(
+                    sim_unused,
+                    first_style + "ext_reg_read_chk(usid_user,8'h" + reg_format + ",8'h00,{1'b0,data" + reserved_mask_for(key_reg) + "});" + code_style,
+                    key_reg,
+                    "data",
+                    expect,
+                    True,
+                )
                 if unused_addr < 28:
                     sim_unused.write(first_style + "reg_write(usid_user,8'h" + unused_format + ",data);" + code_style)
-                    sim_unused.write(first_style + "reg_read_chk(usid_user,8'h" + unused_format + ",{1'b1,8'h00});" + code_style)
+                    if bus_read_supported:
+                        sim_unused.write(first_style + "reg_read_chk(usid_user,8'h" + unused_format + ",{1'b1,8'h00});" + code_style)
                 else:
                     sim_unused.write(first_style + "ext_reg_write(usid_user,8'h" + unused_format + ",8'h00,data);" + code_style)
-                    sim_unused.write(first_style + "ext_reg_read_chk(usid_user,8'h" + unused_format + ",8'h00,{1'b1,8'h00});" + code_style)
-                sim_unused.write(first_style + "ext_reg_read_chk(usid_user,8'h" + reg_format + ",8'h00,{1'b0,data" + reserved_mask_for(key_reg) + "});" + code_style)
+                    if bus_read_supported:
+                        sim_unused.write(first_style + "ext_reg_read_chk(usid_user,8'h" + unused_format + ",8'h00,{1'b1,8'h00});" + code_style)
+                emit_value_read(
+                    sim_unused,
+                    first_style + "ext_reg_read_chk(usid_user,8'h" + reg_format + ",8'h00,{1'b0,data" + reserved_mask_for(key_reg) + "});" + code_style,
+                    key_reg,
+                    "data",
+                    expect,
+                    True,
+                )
                 sim_unused.write("end" + code_style)
                 sim_unused.write("packet_rand = null;" + code_style)
         reg_reset_command(sim_unused)
@@ -1492,7 +1866,7 @@ def sim_special_case():
         sim.write("$display(\"***************************************************\");\n")
         sim.write("task sim_special_case;"+code_style)
         sim.write("reg_write(usid_user,8'h1c,8'hb8);"+code_style)
-        sim.write("reg_read_chk(usid_user,8'h1c,9'h0b8);"+code_style)
+        emit_value_read(sim, "reg_read_chk(usid_user,8'h1c,9'h0b8);"+code_style, "0x1c", "8'hb8", "9'h0b8", False)
         sim.write("packet_rand = new(" + str(generate_random_integer())+");"+code_style)
         sim.write("for(i=0;i<=255;i++) begin"+code_style)
         sim.write(first_style+"packet_rand.randomize();"+code_style)
@@ -1524,19 +1898,19 @@ def sim_reg1c_reg23_reset():
             sim_reset.write("\n")
             display_start_fun(sim_reset, "sim_reg1c_reset_mipi_reserved")
             sim_reset.write("reg_write(usid_user,8'h1c,8'hb8);"+code_style)
-            sim_reset.write("reg_read_chk(usid_user,8'h1c,8'hb8);"+code_style)
+            emit_value_read(sim_reset, "reg_read_chk(usid_user,8'h1c,8'hb8);"+code_style, "0x1c", "8'hb8", "8'hb8", False)
             if '0x22' in reg_dicr:
                 sim_reset.write("ext_reg_write(usid_user,8'h22,8'h00,8'haa);"+code_style)
-                sim_reset.write("ext_reg_read_chk(usid_user,8'h22,8'h00,8'haa);"+code_style)
+                emit_value_read(sim_reset, "ext_reg_read_chk(usid_user,8'h22,8'h00,8'haa);"+code_style, "0x22", "8'haa", "8'haa", True)
             if has_reg(reg_dicr, "0x2b"):
                 sim_reset.write("ext_reg_write(usid_user,8'h2b,8'h00,8'haa);"+code_style)
-                sim_reset.write("ext_reg_read_chk(usid_user,8'h2b,8'h00,8'h0a);"+code_style)
+                emit_value_read(sim_reset, "ext_reg_read_chk(usid_user,8'h2b,8'h00,8'h0a);"+code_style, "0x2b", "8'h0a", "8'h0a", True)
             reg_reset_command(sim_reset)
-            sim_reset.write("reg_read_chk(usid_user,8'h1c,8'h80);"+code_style)
+            emit_value_read(sim_reset, "reg_read_chk(usid_user,8'h1c,8'h80);"+code_style, "0x1c", "8'h80", "8'h80", False)
             if '0x22' in reg_dicr:
-                sim_reset.write("ext_reg_read_chk(usid_user,8'h22,8'h00,8'h00);"+code_style)
+                emit_value_read(sim_reset, "ext_reg_read_chk(usid_user,8'h22,8'h00,8'h00);"+code_style, "0x22", "8'h00", "8'h00", True)
             if has_reg(reg_dicr, "0x2b"):
-                sim_reset.write("ext_reg_read_chk(usid_user,8'h2b,8'h00,8'h00);"+code_style)
+                emit_value_read(sim_reset, "ext_reg_read_chk(usid_user,8'h2b,8'h00,8'h00);"+code_style, "0x2b", "8'h00", "8'h00", True)
         if '0x23' in reg_dicr:
             sim_reset.write("\n")
             display_start_fun(sim_reset, "sim_reg23_reset_user_define")
@@ -1555,20 +1929,20 @@ def sim_reg1c_reg23_reset():
             sim_reset.write("\n")
             display_start_fun(sim_reset, "sim_reg23_reset_mipi_reserved")
             sim_reset.write("reg_write(usid_user,8'h1c,8'hb8);"+code_style)
-            sim_reset.write("reg_read_chk(usid_user,8'h1c,8'hb8);"+code_style)
+            emit_value_read(sim_reset, "reg_read_chk(usid_user,8'h1c,8'hb8);"+code_style, "0x1c", "8'hb8", "8'hb8", False)
             if '0x22' in reg_dicr:
                 sim_reset.write("ext_reg_write(usid_user,8'h22,8'h00,8'haa);"+code_style)
-                sim_reset.write("ext_reg_read_chk(usid_user,8'h22,8'h00,8'haa);"+code_style)
+                emit_value_read(sim_reset, "ext_reg_read_chk(usid_user,8'h22,8'h00,8'haa);"+code_style, "0x22", "8'haa", "8'haa", True)
             if has_reg(reg_dicr, "0x2b"):
                 sim_reset.write("ext_reg_write(usid_user,8'h2b,8'h00,8'haa);"+code_style)
-                sim_reset.write("ext_reg_read_chk(usid_user,8'h2b,8'h00,8'h0a);"+code_style)
+                emit_value_read(sim_reset, "ext_reg_read_chk(usid_user,8'h2b,8'h00,8'h0a);"+code_style, "0x2b", "8'h0a", "8'h0a", True)
             sim_reset.write("// reset all_mipi_reserved;\n"+code_style)
             sim_reset.write("ext_reg_write(usid_user,8'h23,8'h00,8'h80);"+code_style)
-            sim_reset.write("reg_read_chk(usid_user,8'h1c,8'hb8);"+code_style)
+            emit_value_read(sim_reset, "reg_read_chk(usid_user,8'h1c,8'hb8);"+code_style, "0x1c", "8'hb8", "8'hb8", False)
             if '0x22' in reg_dicr:
-                sim_reset.write("ext_reg_read_chk(usid_user,8'h22,8'h00,8'haa);"+code_style)
+                emit_value_read(sim_reset, "ext_reg_read_chk(usid_user,8'h22,8'h00,8'haa);"+code_style, "0x22", "8'haa", "8'haa", True)
             if has_reg(reg_dicr, "0x2b"):
-                sim_reset.write("ext_reg_read_chk(usid_user,8'h2b,8'h00,8'h0a);"+code_style)  
+                emit_value_read(sim_reset, "ext_reg_read_chk(usid_user,8'h2b,8'h00,8'h0a);"+code_style, "0x2b", "8'h0a", "8'h0a", True)  
         reg_reset_command(sim_reset)
         sim_reset.write("\n" + "endtask" + "\n")
     finalize_sim_task("sim_reg1c_reg23_reset.v")
@@ -1844,7 +2218,10 @@ def run_all_generators():
         sim_ext_write_more_reg_no_tri()
 
 
-def generate_sim_cases(register_file_path):
+def generate_sim_cases(register_file_path, read_supported=True, output_ports=None):
+    global bus_read_supported, output_reg_ports
+    bus_read_supported = bool(read_supported)
+    output_reg_ports = set(output_ports or ())
     configure_output_styles()
     prepare_sim_case_dir()
     load_register_context(register_file_path)

@@ -25,6 +25,7 @@ ENV PATH="/usr/local/bin:${PATH}"
 WORKDIR /src
 COPY pyproject.toml uv.lock .python-version ./
 COPY mipi_gui.py gen_sim_case.py sim_flow.py sim_top_gen.py ./
+COPY templates/rffe_base.v ./templates/rffe_base.v
 COPY build/linux/common ./build/linux/common
 COPY build/linux/rocky-linux8/build-rocky-linux8.sh ./build/linux/rocky-linux8/build-rocky-linux8.sh
 RUN chmod +x /src/build/linux/rocky-linux8/build-rocky-linux8.sh /src/build/linux/common/build.sh

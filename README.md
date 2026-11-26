@@ -71,7 +71,9 @@ graph LR
 python mipi_gui.py
 ```
 
-界面打开后，工程目录默认是 `C:\Users\Dong Tao\Desktop\python_develop\python_sim_env`。换工程时点「选择」。目录还不存在时，把路径填进工程目录，点「创建」。
+界面打开后，工程目录默认是 `C:\Users\Dong Tao\Desktop\python_develop\python_sim_env`。换工程时点「选择」。所选目录里已有内容时，确认后清空该目录。目录还不存在时，把路径填进工程目录，点「创建」。
+
+「支持读」默认是「是」，激励仍用总线读检查。「否」时，只有设计输出端口上的 `regXX` 用 `reg_port_chk` 或 `ext_reg_port_chk` 核对，保留寄存器和没有输出端口的寄存器不再读。这个选择记在工程目录的 `read_support.txt`。点「生成连接」时，「否」会单独生成带这两个任务的 `sim_top/rffe_base.v`。
 
 ## 按顺序操作
 
@@ -93,7 +95,7 @@ filelist 里的 RTL 路径仍写成 `../../src/slave/<文件名>`，再加上对
 
 ### 2. 生成激励
 
-选择寄存器 Excel，点「1 生成激励」。
+选择寄存器 Excel，点「生成激励」。
 
 激励写到工程目录的 `sim_case_list/*.v`。下方日志会列出文件名和数量。
 
@@ -107,9 +109,9 @@ filelist 里的 RTL 路径仍写成 `../../src/slave/<文件名>`，再加上对
 
 ### 4. 生成环境
 
-确认设计路径后，点「2 生成环境」。
+确认设计路径后，点「生成环境」。
 
-点「生成连接」时，从设计路径里的 `mipi_core.v` 读取端口，改写工程目录 `sim_top/rffe_base.v` 的 `mipi_slave` 连接。`rffe_base.v` 里的任务库保持不变。点「仿真配置」可以改 `sim_top/sim_config.v` 里的 USID、厂家号和产品号，保存后写入该文件。
+点「生成连接」时，从设计路径里的 `mipi_core.v` 读取端口，改写工程目录 `sim_top/rffe_base.v` 的 `mipi_slave` 连接。工程里还没有这个文件时，会先放入任务库再改连接；已有文件只改实例，任务库保持不变。点「仿真配置」可以改 `sim_top/sim_config.v` 里的 USID、厂家号和产品号，保存后写入该文件。
 
 > 这一步会清空上一级目录中当前模式的全部内容，例如选择 `sim` 会清空 `python_develop\sim`。确认框点确定后才会执行。
 
@@ -123,7 +125,7 @@ Linux 上，`sim_config.v`、`rffe_base.v` 和用例激励以符号链接放进�
 
 ### 5. 运行仿真
 
-点「3 运行仿真」。请在 Linux 上执行。Windows 上没有 `make` 时会提示失败。
+点「运行仿真」。请在 Linux 上执行。Windows 上没有 `make` 时会提示失败。
 
 ### 6. 收集日志
 

@@ -1,5 +1,6 @@
 import os
 import re
+import sys
 from pathlib import Path
 
 
@@ -218,22 +219,164 @@ def render_instance(ports):
     return "\n".join(lines) + "\n"
 
 
+def _task_library():
+    if getattr(sys, "frozen", False):
+        base = Path(getattr(sys, "_MEIPASS", Path(sys.executable).resolve().parent))
+    else:
+        base = Path(__file__).resolve().parent
+    path = base / "templates" / "rffe_base.v"
+    if not path.is_file():
+        raise FileNotFoundError(f"找不到任务库模板: {path}")
+    return path
+
+
 def update_rffe_instance(project, design):
     core = find_mipi_core(design)
     rffe = Path(project) / "sim_top" / "rffe_base.v"
     if not rffe.is_file():
-        raise FileNotFoundError(f"找不到任务库: {rffe}")
+        rffe.parent.mkdir(parents=True, exist_ok=True)
+        rffe.write_bytes(_task_library().read_bytes())
     ports = parse_mipi_ports(core.read_text(encoding="utf-8", errors="replace"))
     block = render_instance(ports)
     original = rffe.read_bytes()
     text = original.decode("utf-8", errors="replace")
     updated = _splice_instance(text, block)
+    _write_rffe(rffe, updated, original)
+    return core, rffe, ports
+
+
+_REG_PORT = re.compile(r"^reg([0-9a-fA-F]{2})$")
+_PORT_BEGIN = "//==== reg_port_chk begin ===="
+_PORT_END = "//==== reg_port_chk end ===="
+
+
+def output_reg_ports(ports):
+    found = []
+    for name, direction, width in ports:
+        if direction not in {"output", "inout"}:
+            continue
+        match = _REG_PORT.fullmatch(name)
+        if not match:
+            continue
+        found.append((int(match.group(1), 16), name, width))
+    found.sort()
+    return found
+
+
+def output_reg_addrs(ports):
+    return [addr for addr, _name, _width in output_reg_ports(ports)]
+
+
+def render_port_tasks(ports):
+    items = output_reg_ports(ports)
+    body = "\n".join(_render_port_task(name, items) for name in ("reg_port_chk", "ext_reg_port_chk"))
+    return f"{_PORT_BEGIN}\n{body}{_PORT_END}\n"
+
+
+def write_rffe_base_no_read(project, design):
+    core = find_mipi_core(design)
+    rffe = Path(project) / "sim_top" / "rffe_base.v"
+    rffe.parent.mkdir(parents=True, exist_ok=True)
+    if not rffe.is_file():
+        rffe.write_bytes(_task_library().read_bytes())
+    ports = parse_mipi_ports(core.read_text(encoding="utf-8", errors="replace"))
+    original = rffe.read_bytes()
+    text = original.decode("utf-8", errors="replace")
+    text = _splice_instance(text, render_instance(ports))
+    text = _splice_port_tasks(text, render_port_tasks(ports))
+    _write_rffe(rffe, text, original)
+    return core, rffe, ports
+
+
+def _write_rffe(path, text, original):
     newline = b"\r\n" if b"\r\n" in original else b"\n"
-    data = updated.replace("\r\n", "\n").encode("utf-8")
+    data = text.replace("\r\n", "\n").encode("utf-8")
     if newline == b"\r\n":
         data = data.replace(b"\n", b"\r\n")
-    rffe.write_bytes(data)
-    return core, rffe, ports
+    path.write_bytes(data)
+
+
+def _port_value_expr(name, width):
+    bits = _width_bits(width) if width else 8
+    if bits > 8:
+        return f"{name}[7:0]"
+    if bits < 8:
+        return f"{{{(8 - bits)}'b0,{name}}}"
+    return name
+
+
+def _render_port_task(task_name, items):
+    lines = [
+        "//===========================================",
+        f"// {task_name}",
+        "//===========================================",
+        f"task {task_name};",
+        "input [7:0] sa;",
+        "input [7:0] reg_addr;",
+        "input [7:0] write_data;",
+        "input [8:0] expect_data;",
+        "reg [7:0] port_data;",
+        "bit hit;",
+        "    hit = 1'b0;",
+        "    port_data = 8'h00;",
+        "    case (reg_addr)",
+    ]
+    for addr, name, width in items:
+        expr = _port_value_expr(name, width)
+        lines.append(f"        8'h{addr:02x}: begin port_data = {expr}; hit = 1'b1; end")
+    lines.extend([
+        "        default: hit = 1'b0;",
+        "    endcase",
+        "    if (hit == 1'b0) begin",
+        '        $display("************************************************");',
+        '        $display("**   REG_ADDR        : \'h%2H", reg_addr);',
+        '        $display("**   ERROR!!!  no output port                 ");',
+        '        $display("************************************************");',
+        "        err_cnt = err_cnt + 1;",
+        "    end",
+        "    else if (port_data !== expect_data[7:0]) begin",
+        '        $display("************************************************");',
+        '        $display("**   REG_ADDR        : \'h%2H", reg_addr);',
+        '        $display("**   WRITE_DATA      : \'h%2H", write_data);',
+        '        $display("**   IDEAL_DATA      : \'h%2H", expect_data[7:0]);',
+        '        $display("**   PORT_DATA       : \'h%2H", port_data);',
+        '        $display("**   ERROR!!!                                   ");',
+        '        $display("************************************************");',
+        "        err_cnt = err_cnt + 1;",
+        "    end",
+        "    else begin",
+        '        $display("////////////////////////////////");',
+        '        $display("//   REG_ADDR    : \'h%2H         ", reg_addr);',
+        '        $display("//   WRITE_DATA  : \'h%2H         ", write_data);',
+        '        $display("//   IDEAL_DATA  : \'h%2H         ", expect_data[7:0]);',
+        '        $display("//   PORT_DATA   : \'h%2H         ", port_data);',
+        '        $display("////////////////////////////////");',
+        "    end",
+        "endtask",
+        "",
+    ])
+    return "\n".join(lines)
+
+
+def _splice_port_tasks(text, block):
+    start = text.find(_PORT_BEGIN)
+    if start >= 0:
+        end = text.find(_PORT_END, start)
+        if end < 0:
+            raise ValueError("rffe_base.v 里的 reg_port_chk 标记不完整")
+        end = text.find("\n", end)
+        end = len(text) if end < 0 else end + 1
+        return text[:start] + block + text[end:]
+    marker = text.find("mipi_core mipi_slave")
+    if marker < 0:
+        raise ValueError("rffe_base.v 里没有 mipi_core mipi_slave 实例")
+    end = text.find(");", marker)
+    if end < 0:
+        raise ValueError("mipi_slave 实例没有结束")
+    insert_at = end + 2
+    if insert_at < len(text) and text[insert_at] == "\n":
+        insert_at += 1
+    return text[:insert_at] + block + text[insert_at:]
 
 
 def _connect(name, direction, width):
