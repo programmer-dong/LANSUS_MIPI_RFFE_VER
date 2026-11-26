@@ -1133,7 +1133,7 @@ def extended_timed_trigger_loop_body(file, usid_user, tri_reg, tri_mask, reg_for
     display_start_fun(file, "write time cnt reg")
     cnt_reg = timed_tri_mapped.get(tri_mask)
     if cnt_reg:
-        timed_trigger_cnt(file, cnt_reg.replace("8'h", ""), random.randint(0, 255))
+        timed_trigger_cnt(file, cnt_reg.replace("8'h", ""), random.randint(1, 255))
     file.write(first_style + "// read " + reg_format_user + code_style)
     emit_value_read(
         file,
