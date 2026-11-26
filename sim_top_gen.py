@@ -118,6 +118,19 @@ def write_sim_config(project, values):
 
 
 def find_mipi_core(design):
+    parts = [part.strip() for part in str(design).split(os.pathsep) if part.strip()]
+    if len(parts) > 1:
+        for part in parts:
+            path = Path(part)
+            if path.is_file() and path.name == "mipi_core.v":
+                return path
+        error = None
+        for part in parts:
+            try:
+                return find_mipi_core(part)
+            except FileNotFoundError as exc:
+                error = exc
+        raise error
     path = Path(design)
     if not str(path).strip():
         raise FileNotFoundError("先选择设计路径。")
@@ -315,6 +328,7 @@ def _render_port_task(task_name, items):
         "input [7:0] reg_addr;",
         "input [7:0] write_data;",
         "input [8:0] expect_data;",
+        "input string cmd_name;",
         "reg [7:0] port_data;",
         "bit hit;",
         "    hit = 1'b0;",
@@ -329,6 +343,8 @@ def _render_port_task(task_name, items):
         "    endcase",
         "    if (hit == 1'b0) begin",
         '        $display("************************************************");',
+        '        $display("**   CMD_CNT         : %d", cmd_cnt);',
+        '        $display("**   CMD             : %s", cmd_name);',
         '        $display("**   REG_ADDR        : \'h%2H", reg_addr);',
         '        $display("**   ERROR!!!  no output port                 ");',
         '        $display("************************************************");',
@@ -336,6 +352,8 @@ def _render_port_task(task_name, items):
         "    end",
         "    else if (port_data !== expect_data[7:0]) begin",
         '        $display("************************************************");',
+        '        $display("**   CMD_CNT         : %d", cmd_cnt);',
+        '        $display("**   CMD             : %s", cmd_name);',
         '        $display("**   REG_ADDR        : \'h%2H", reg_addr);',
         '        $display("**   WRITE_DATA      : \'h%2H", write_data);',
         '        $display("**   IDEAL_DATA      : \'h%2H", expect_data[7:0]);',
@@ -346,6 +364,8 @@ def _render_port_task(task_name, items):
         "    end",
         "    else begin",
         '        $display("////////////////////////////////");',
+        '        $display("//   CMD_CNT    : %d          ", cmd_cnt);',
+        '        $display("//   CMD        : %s          ", cmd_name);',
         '        $display("//   REG_ADDR    : \'h%2H         ", reg_addr);',
         '        $display("//   WRITE_DATA  : \'h%2H         ", write_data);',
         '        $display("//   IDEAL_DATA  : \'h%2H         ", expect_data[7:0]);',

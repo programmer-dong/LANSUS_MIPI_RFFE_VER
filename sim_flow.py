@@ -1,4 +1,5 @@
 import contextlib
+import getpass
 import importlib.util
 import io
 import os
@@ -234,12 +235,13 @@ def _reset_dir(path):
         path.mkdir(parents=True)
 
 
+def design_paths(design):
+    return [Path(part.strip()) for part in str(design).split(os.pathsep) if part.strip()]
+
+
 def _mipi_names(design):
     if design.is_file():
-        name = design.name
-        if name.startswith("mipi") and name.endswith(".v"):
-            return [name]
-        return []
+        return [design.name]
     names = []
 
     def walk(folder):
@@ -255,31 +257,39 @@ def _mipi_names(design):
     return names
 
 
-def _filelist(mode, design):
+def _design_names(paths):
+    names = []
+    for path in paths:
+        for name in _mipi_names(path):
+            if name not in names:
+                names.append(name)
+    return names
+
+
+def _filelist(mode, paths):
+    if mode != "sim" and len(paths) == 1 and paths[0].is_dir():
+        names = [paths[0].name]
+    else:
+        names = _design_names(paths)
+    lines = "".join(f"../../src/slave/{name}\n" for name in names)
     if mode == "sim":
-        text = (
+        return (
             "\n\n//SIM TOP        \n"
             "./sim_top/tb_mipi_master.v \n"
             "\n//RTL file list\n"
             "\n//-------------MIPI SLAVE---\n"
+            "\n" + lines
         )
-        for name in _mipi_names(design):
-            text += "\n../../src/slave/" + name
-        return text + "\n"
-    if mode == "sim_dc":
-        return (
-            "\n//SIM TOP        \n"
-            "./sim_top/tb_mipi_master.v \n"
-            "//-------------MIPI SLAVE---\n"
-            f"../../src/slave/{design.name}\n"
-            "../../dc/output_data/mipi_core.mapped.v\n\n"
-        )
+    netlist = (
+        "../../dc/output_data/mipi_core.mapped.v\n\n"
+        if mode == "sim_dc"
+        else "../../innovus_pnr/work/mipi_core_pr.v\n"
+    )
     return (
         "\n//SIM TOP        \n"
         "./sim_top/tb_mipi_master.v \n"
         "//-------------MIPI SLAVE---\n"
-        f"../../src/slave/{design.name}\n"
-        "../../innovus_pnr/work/mipi_core_pr.v\n"
+        f"{lines}{netlist}"
     )
 
 
@@ -314,9 +324,12 @@ def generate_env(env_dir, mode, design):
         raise ValueError(f"未知模式: {mode}")
     if not env_dir.is_dir():
         raise FileNotFoundError(f"工程目录不存在: {env_dir}")
-    design = Path(design).resolve()
-    if not design.exists():
-        raise FileNotFoundError(f"设计路径不存在: {design}")
+    paths = [path.resolve() for path in design_paths(design)]
+    if not paths:
+        raise FileNotFoundError("设计路径不存在")
+    missing = next((path for path in paths if not path.exists()), None)
+    if missing:
+        raise FileNotFoundError(f"设计路径不存在: {missing}")
     cases = sorted((env_dir / "sim_case_list").glob("*.v"))
     if not cases:
         raise FileNotFoundError(f"没有用例: {env_dir / 'sim_case_list'}")
@@ -336,7 +349,7 @@ def generate_env(env_dir, mode, design):
         _symlink(f"../../../python_sim_env/sim_case_list/{case.name}", folder)
 
     stamp = datetime.now().strftime("%Y-%m-%d %H:%M")
-    filelist = _filelist(mode, design)
+    filelist = _filelist(mode, paths)
     includes = "".join(f'`include "sim_top/{case.stem}.v"\n' for case in cases)
     for folder in [path for path in sim_dir.iterdir() if path.is_dir()]:
         if folder.name == "all_sim_file":
@@ -371,22 +384,28 @@ def collect_logs(env_dir, mode):
     elif dest.is_dir():
         shutil.rmtree(dest)
     dest.mkdir()
-    lines = []
+    lines = [
+        "*************************************",
+        f"********  {mode.upper()} LOG FILE  **********",
+        "*************************************",
+    ]
     for case in sorted(path for path in mode_dir.iterdir() if path.is_dir()):
         log_file = case / f"{case.name}.log"
         if log_file.is_file():
             _symlink(str(log_file.resolve()), dest)
-            lines.append(f"linked {case.name}.log")
+            lines.append(f"{case.name}:{case.resolve()}")
         else:
-            lines.append(f"no file {case.name}.log")
-    lines.append("finished!!!")
+            lines.append(f"{case.name}:no file")
     return "\n".join(lines)
 
 
-def check_logs(env_dir):
-    env_dir = Path(env_dir)
-    lines = []
-    total = 0
+def check_logs(env_dir, mode="sim"):
+    env_dir = Path(env_dir).resolve()
+    if mode not in MODES:
+        mode = "sim"
+    collected = collect_logs(env_dir, mode)
+    mode_dir = env_dir.parent / mode
+    failures = []
     log_dir = env_dir / "all_sim_log"
     if log_dir.is_dir():
         for log_file in sorted(log_dir.glob("*.log")):
@@ -398,32 +417,38 @@ def check_logs(env_dir):
                 if "ERROR!!!" in line
             )
             if count:
-                total += count
-                lines.append(f"ERROR found in: all_sim_log/{log_file.name} (count:{count})")
-    part = ""
-    for path in sorted(env_dir.iterdir()):
-        if path.is_file() and path.suffix.lower() in {".xls", ".xlsx"}:
-            part = path.name.split("_", 1)[0]
-    lines.extend([
+                stim = mode_dir / log_file.stem / "sim_top" / f"{log_file.stem}.v"
+                failures.append((log_file.stem, count, stim))
+    lines = [
         "*************************************",
-        f"VER_PROJECT: {part}",
-        "VER_AUTHOR: DongTao",
-        f"VER_DATE: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}",
-        f"ALL_ERR_CNT: {total}",
+        f"项目：{env_dir}",
+        f"验证人：{getpass.getuser()}",
+        f"验证日期：{datetime.now().strftime('%Y-%m-%d %H:%M:%S')}",
+        f"验证是否通过：{'PASS' if not failures else 'FAIL'}",
         "*************************************",
-    ])
-    return "\n".join(lines)
+    ]
+    if failures:
+        lines.append("测试名称\t失败次数\t激励文件位置\t重新测试")
+        for name, count, stim in failures:
+            lines.append(f"{name}\t{count}\t{stim}\t单测 {name}")
+    report = collected + "\n\n" + "\n".join(lines)
+    stamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+    report_path = env_dir / f"{mode}_{stamp}.log"
+    report_path.write_text(report + "\n", encoding="utf-8", newline="\n")
+    return report + f"\n\n已写入 {report_path}"
 
 
-def run_sim(env_dir, mode):
+def run_sim(env_dir, mode, only=None):
     if mode not in MODES:
         mode = "sim"
     sim_dir = Path(env_dir).resolve().parent / mode
     if not sim_dir.is_dir():
         raise FileNotFoundError(f"仿真目录不存在: {sim_dir}")
     folders = [path for path in sim_dir.iterdir() if path.is_dir()]
+    if only:
+        folders = [path for path in folders if path.name == only]
     if not folders:
-        raise FileNotFoundError(f"没有仿真用例目录: {sim_dir}")
+        raise FileNotFoundError(f"没有仿真用例目录: {sim_dir if not only else only}")
     target = make_target(mode)
     gnome = shutil.which("gnome-terminal")
     lines = []

@@ -25,6 +25,7 @@ MIPI_RESERVED_SET = {addr.lower() for addr in mipi_reserver_all_reg}
 # 运行时由 main() 注入的全局配置（保持与历史脚本兼容）
 first_style = second_style = loop_style = code_style = ""
 bus_read_supported = True
+port_cmd = ""
 output_reg_ports = set()
 trigger_0_mask = trigger_1_mask = trigger_2_mask = ""
 trigger_0_reg = trigger_1_reg = trigger_2_reg = ""
@@ -135,6 +136,11 @@ def _as_addr(addr):
         return None
 
 
+def use_port_cmd(name):
+    global port_cmd
+    port_cmd = name
+
+
 def emit_value_read(file, legacy, addr, write_expr, expect_expr, extended=False):
     if bus_read_supported:
         file.write(legacy)
@@ -144,7 +150,8 @@ def emit_value_read(file, legacy, addr, write_expr, expect_expr, extended=False)
         return
     task = "ext_reg_port_chk" if extended else "reg_port_chk"
     indent = re.match(r"[ \t]*", legacy).group(0)
-    file.write(f"{indent}{task}(usid_user,8'h{number:02x},{write_expr},{expect_expr});{code_style}")
+    name = port_cmd or ("EXT_REG_WRITE" if extended else "REG_WRITE")
+    file.write(f'{indent}{task}(usid_user,8\'h{number:02x},{write_expr},{expect_expr},"{name}");{code_style}')
 
 
 def emit_read_chk(file, chk_type, addr_hex, data_expr, reg_key, write_expr=None):
@@ -465,6 +472,7 @@ def _addr_token(line):
 
 def write_reg_chk(file, trigger_format, value_str, command_support):
     number_int = int(trigger_format, 16)
+    use_port_cmd("EXT_REG_WRITE" if number_int > 31 else "REG_WRITE")
     expect = f"9'b0{value_str}"
     written = f"8'b{value_str}"
     if command_support == "support" and number_int > 31:
@@ -723,6 +731,7 @@ def trigger_enable(file, all_reg_trigger):
     _set_extended_trigger(file, all_reg_trigger, "30", "11-17", enable=True)
 
 def reg0_command_loop_body(file, usid_user, result_reg_dict, ext_com_support):
+    use_port_cmd("REG0_WRITE")
     file.write("packet_rand = new(" + str(generate_random_integer())+");"+code_style)
     file.write("for(i=0; i<=255; i++) begin" + code_style)
     file.write("    packet_rand.randomize();" + code_style)
@@ -742,6 +751,7 @@ def reg0_command_loop_body(file, usid_user, result_reg_dict, ext_com_support):
 
 
 def reg0_command_trigger_loop_body(file, usid_user, result_reg_dict, ext_com_support, trigger_list):
+    use_port_cmd("REG0_WRITE")
     file.write("packet_rand = new(" + str(generate_random_integer()) + ");" +code_style)
     file.write("for(i=0; i<=255; i++) begin" + code_style)
     file.write(first_style + "packet_rand.randomize();" + code_style)
@@ -787,6 +797,7 @@ def reg0_command_trigger_loop_body(file, usid_user, result_reg_dict, ext_com_sup
 
  
 def reg_command_loop_body(file, usid_user, each_reg, result_reg_dict, ext_com_support):
+    use_port_cmd("REG_WRITE")
     reg_format = reg_hex(each_reg)
     decimal_number = reg_decimal(each_reg)
     write_spec_data(file, each_reg, 1)
@@ -809,6 +820,7 @@ def reg_command_loop_body(file, usid_user, each_reg, result_reg_dict, ext_com_su
         file.write("packet_rand = null;"+code_style)
 
 def reg_command_trigger_loop_body(file, usid_user, each_reg, result_reg_dict, ext_com_support, trigger_list):
+    use_port_cmd("REG_WRITE")
     reg_format = reg_hex(each_reg)
     write_spec_data(file, each_reg, 5)
     file.write("// reg" + reg_format + code_style)
@@ -858,6 +870,7 @@ def reg_command_trigger_loop_body(file, usid_user, each_reg, result_reg_dict, ex
     reset_reg1c(file)
 
 def ext_command_loop_body(file, usid_user, each_reg, result_reg_dict, ext_com_support):
+    use_port_cmd("EXT_REG_WRITE")
     reg_format = reg_hex(each_reg)
     write_spec_data(file, each_reg, 2)
     file.write("packet_rand = new("+str(generate_random_integer())+");" + code_style)
@@ -879,6 +892,7 @@ def ext_command_loop_body(file, usid_user, each_reg, result_reg_dict, ext_com_su
 
 
 def ext_command_trigger_loop_body(file, usid_user, each_reg, result_reg_dict, ext_com_support, trigger_list, write_command):
+    use_port_cmd("EXT_REG_WRITE")
     reg_format = reg_hex(each_reg)
     write_spec_data(file, each_reg, 6)
     file.write("// reg" + reg_format + code_style)
@@ -928,6 +942,7 @@ def ext_command_trigger_loop_body(file, usid_user, each_reg, result_reg_dict, ex
     reset_reg1c(file)
 
 def _write_masked_loop(file, each_reg, reg_format, extended, result_reg_dict, ext_com_support, before_read=None):
+    use_port_cmd("MASKED_WRITE")
     file.write("data_pre = 8'b" + default_value_dict[each_reg] + ";" + code_style)
     file.write("packet_rand = new(" + str(generate_random_integer()) + ");" + code_style)
     file.write("packet_rand_two = new(" + str(generate_random_integer()) + ");" + code_style)
@@ -957,6 +972,7 @@ def _write_masked_loop(file, each_reg, reg_format, extended, result_reg_dict, ex
 
 
 def masked_write_command_loop_body(file, usid_user, each_reg, result_reg_dict, ext_com_support, skip_special_values=False):
+    use_port_cmd("MASKED_WRITE")
     if "x" not in normalize_reg(each_reg):
         return
     reg_format = reg_hex(each_reg)
@@ -995,6 +1011,7 @@ def masked_write_command_trigger_loop_body(file, usid_user, each_reg, result_reg
     reset_reg1c(file)
 
 def _emit_ext_trigger_arm(file, tri_reg, tri_mask, reg_format_udr, reg_value, reg_format_user):
+    use_port_cmd("EXT_REG_WRITE")
     split_line(file, " start:" + tri_mask + " ")
     file.write("// trigger_mask_" + tri_mask.split("_")[1] + code_style)
     if tri_mask in ext_trigger_3_10:
@@ -1090,6 +1107,7 @@ def extended_trigger_loop_body(file, usid_user, tri_reg, tri_mask, reg_format_ud
     _emit_ext_trigger_tail(file, tri_mask)
 
 def write_read_chk(file, reg_tri_cnt, number):
+    use_port_cmd("EXT_REG_WRITE")
     cmd = first_style + "ext_reg_read_chk(usid_user,8'h{:02x},8'h00,9'h{:03x});".format(int(reg_tri_cnt, 16), number)
     emit_value_read(
         file,
@@ -1247,6 +1265,7 @@ def sim_reg31_to_reg3f(file, usid_user, time_reg_list):
 
 def _emit_err_seq(file, label, write_fn, err_fn, read_fn, write_addr, read_addr, reg_key, sum_bits):
     """生成一组错误注入序列：写入 -> 校验 -> 注错 -> 校验 -> 重写 -> 校验 -> sum_err 校验。"""
+    use_port_cmd({"reg_write": "REG_WRITE", "ext_reg_write": "EXT_REG_WRITE", "masked_write": "MASKED_WRITE"}.get(write_fn, "REG_WRITE"))
     read_55 = read_expected_with_reserved(reg_key, "8'h55")
     read_66 = read_expected_with_reserved(reg_key, "8'h66")
     file.write(f"$display(\"****{label}****\");" + code_style)
@@ -1857,27 +1876,6 @@ def sim_write_unused_reg():
     finalize_sim_task("sim_write_unused_reg.v", strip_empty=False)
 
 
-def sim_special_case():
-    with open("sim_special_case.v", 'w', encoding='utf-8') as sim:
-        write_data_begin(sim)
-        sim.write("`define UNUSED 8'h00"+"\n")
-        sim.write("$display(\"***************************************************\");\n")
-        sim.write("$display(\"*** You can write some targeted test cases here ***\");\n")
-        sim.write("$display(\"***************************************************\");\n")
-        sim.write("task sim_special_case;"+code_style)
-        sim.write("reg_write(usid_user,8'h1c,8'hb8);"+code_style)
-        emit_value_read(sim, "reg_read_chk(usid_user,8'h1c,9'h0b8);"+code_style, "0x1c", "8'hb8", "9'h0b8", False)
-        sim.write("packet_rand = new(" + str(generate_random_integer())+");"+code_style)
-        sim.write("for(i=0;i<=255;i++) begin"+code_style)
-        sim.write(first_style+"packet_rand.randomize();"+code_style)
-        sim.write(first_style+"data = packet_rand.data_packet;"+code_style)
-        sim.write("end"+code_style)
-        sim.write("packet_rand = null;"+code_style)
-        reg_reset_command(sim)
-        sim.write("\n" + "endtask" + "\n")
-    finalize_sim_task("sim_special_case.v", strip_empty=False)
-
-
 def sim_reg1c_reg23_reset():
     with open("sim_reg1c_reg23_reset.v", 'w', encoding='utf-8') as sim_reset:
         write_data_begin(sim_reset)
@@ -2206,7 +2204,6 @@ def run_all_generators():
 
     sim_mipi_reserved_reg(mipi_reserved_reg)
     sim_write_unused_reg()
-    sim_special_case()
     if all_bsid_reg:
         sim_write_with_bsid()
     if all_gsid_reg and "0x22" in reg_dicr:

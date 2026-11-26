@@ -51,7 +51,7 @@ def default_project():
     return APP_DIR
 
 
-_LOG_LINK = re.compile(r"all_sim_log/\S+\.log")
+_MARK = re.compile(r"单测 \S+|/[^\s]+|[A-Za-z]:[\\/][^\s]+")
 
 
 def sim_folder_for_log(project, relative, mode):
@@ -358,9 +358,11 @@ class MipiAutoVerifyApp:
             pady=12,
         )
         self.result_text.tag_configure("loglink", foreground="#7dd3fc", underline=True)
-        self.result_text.tag_bind("loglink", "<Button-1>", self._open_log_link)
-        self.result_text.tag_bind("loglink", "<Enter>", lambda event: self.result_text.configure(cursor="hand2"))
-        self.result_text.tag_bind("loglink", "<Leave>", lambda event: self.result_text.configure(cursor=""))
+        self.result_text.tag_configure("retest", foreground="#f5c16c", underline=True)
+        for tag, handler in (("loglink", self._open_log_link), ("retest", self._rerun_case)):
+            self.result_text.tag_bind(tag, "<Button-1>", handler)
+            self.result_text.tag_bind(tag, "<Enter>", lambda event: self.result_text.configure(cursor="hand2"))
+            self.result_text.tag_bind(tag, "<Leave>", lambda event: self.result_text.configure(cursor=""))
         self.result_text.grid(row=1, column=0, sticky="nsew")
         scroll = ttk.Scrollbar(frame, command=self.result_text.yview)
         scroll.grid(row=1, column=1, sticky="ns")
@@ -419,13 +421,19 @@ class MipiAutoVerifyApp:
             self.design_path.set(path)
 
     def select_design_file(self):
-        path = filedialog.askopenfilename(
-            title="选择设计或库文件",
-            initialdir=self.project_path.get() or str(APP_DIR),
+        current = self.design_path.get().strip()
+        initial = self.project_path.get() or str(APP_DIR)
+        if current:
+            parent = Path(current.split(os.pathsep)[0]).parent
+            if parent.is_dir():
+                initial = str(parent)
+        paths = filedialog.askopenfilenames(
+            title="选择设计或库文件，可多选",
+            initialdir=initial,
             filetypes=(("Verilog / library", "*.v *.sv *.lib"), ("All files", "*.*")),
         )
-        if path:
-            self.design_path.set(path)
+        if paths:
+            self.design_path.set(os.pathsep.join(paths))
 
     def generate_cases(self):
         project = self.project_path.get().strip()
@@ -551,7 +559,8 @@ class MipiAutoVerifyApp:
 
     def check_logs(self):
         project = self.project_path.get().strip()
-        self._start("正在检查日志...", lambda: sim_flow.check_logs(project))
+        mode = self.mode_var.get().strip()
+        self._start("正在检查日志...", lambda: sim_flow.check_logs(project, mode))
 
     def _start(self, status, work):
         self._set_busy(True)
@@ -595,34 +604,52 @@ class MipiAutoVerifyApp:
 
     def _append_result(self, text):
         for line in text.splitlines(keepends=True):
-            match = _LOG_LINK.search(line)
-            if not match:
-                self.result_text.insert(tk.END, line)
-                continue
-            self.result_text.insert(tk.END, line[:match.start()])
-            self.result_text.insert(tk.END, match.group(0), "loglink")
-            self.result_text.insert(tk.END, line[match.end():])
+            cursor = 0
+            for match in _MARK.finditer(line):
+                self.result_text.insert(tk.END, line[cursor:match.start()])
+                tag = "retest" if match.group(0).startswith("单测") else "loglink"
+                self.result_text.insert(tk.END, match.group(0), tag)
+                cursor = match.end()
+            self.result_text.insert(tk.END, line[cursor:])
         self.result_text.see(tk.END)
 
-    def _open_log_link(self, event):
+    def _mark_at(self, event, tag):
         index = self.result_text.index(f"@{event.x},{event.y}")
-        ranges = self.result_text.tag_ranges("loglink")
+        ranges = self.result_text.tag_ranges(tag)
         for start, end in zip(ranges[0::2], ranges[1::2]):
             if self.result_text.compare(start, "<=", index) and self.result_text.compare(index, "<", end):
-                relative = self.result_text.get(start, end)
-                folder = sim_folder_for_log(
-                    self.project_path.get().strip(),
-                    relative,
-                    self.mode_var.get().strip(),
-                )
-                if folder is None:
-                    messagebox.showerror("仿真目录", f"找不到仿真目录: {relative}")
-                else:
-                    try:
-                        open_folder(folder)
-                    except OSError as exc:
-                        messagebox.showerror("仿真目录", f"无法打开目录: {folder}\n{exc}")
-                return "break"
+                return self.result_text.get(start, end)
+        return None
+
+    def _open_log_link(self, event):
+        text = self._mark_at(event, "loglink")
+        if text is None:
+            return
+        path = Path(text)
+        if not path.is_absolute():
+            folder = sim_folder_for_log(
+                self.project_path.get().strip(),
+                text,
+                self.mode_var.get().strip(),
+            )
+            path = folder if folder is not None else path
+        if path.is_file():
+            path = path.parent
+        try:
+            open_folder(path)
+        except OSError as exc:
+            messagebox.showerror("仿真目录", f"无法打开: {path}\n{exc}")
+        return "break"
+
+    def _rerun_case(self, event):
+        text = self._mark_at(event, "retest")
+        if text is None:
+            return "break"
+        name = text.split()[-1]
+        project = self.project_path.get().strip()
+        mode = self.mode_var.get().strip()
+        self._start(f"正在单测 {name}...", lambda: sim_flow.run_sim(project, mode, name))
+        return "break"
 
 
 def main():
