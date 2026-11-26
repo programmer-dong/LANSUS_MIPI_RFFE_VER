@@ -103,8 +103,8 @@ jobs:
           mkdir -p candidate/centos-7 candidate/rocky-linux8
           tar -C dist/linux/centos7-x86_64 -cf candidate/centos-7/mipi_gui.tar mipi_gui
           tar -C dist/linux/rocky-linux8-x86_64 -cf candidate/rocky-linux8/mipi_gui.tar mipi_gui
-          tar -tf candidate/centos-7/mipi_gui.tar | grep -qx 'mipi_gui/mipi_gui'
-          tar -tf candidate/rocky-linux8/mipi_gui.tar | grep -qx 'mipi_gui/mipi_gui'
+          tar -tf candidate/centos-7/mipi_gui.tar mipi_gui/mipi_gui >/dev/null
+          tar -tf candidate/rocky-linux8/mipi_gui.tar mipi_gui/mipi_gui >/dev/null
           expected=$'candidate/centos-7/mipi_gui.tar\ncandidate/rocky-linux8/mipi_gui.tar'
           actual="$(find candidate -type f | sort)"
           test "${actual}" = "${expected}"
